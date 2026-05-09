@@ -5,34 +5,34 @@ use thiserror::Error;
 pub enum ClaudeSDKError {
     #[error("CLI connection error: {0}")]
     CLIConnection(#[from] CLIConnectionError),
-    
+
     #[error("CLI not found: {0}")]
     CLINotFound(CLINotFoundError),
-    
+
     #[error("Process error: {0}")]
     Process(#[from] ProcessError),
-    
+
     #[error("JSON decode error: {0}")]
     CLIJSONDecode(#[from] CLIJSONDecodeError),
-    
+
     #[error("Message parse error: {0}")]
     MessageParse(#[from] MessageParseError),
-    
+
     #[error("IO error: {0}")]
     IO(#[from] std::io::Error),
-    
+
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
-    
+
     #[error("Session error: {0}")]
     Session(String),
-    
+
     #[error("MCP error: {0}")]
     MCP(String),
-    
+
     #[error("Control request error: {subtype} - {message}")]
     ControlRequest { subtype: String, message: String },
-    
+
     #[error("{0}")]
     Other(String),
 }
@@ -99,7 +99,11 @@ impl std::fmt::Display for ProcessError {
 impl std::error::Error for ProcessError {}
 
 impl ProcessError {
-    pub fn new(message: impl Into<String>, exit_code: Option<i32>, stderr: impl Into<String>) -> Self {
+    pub fn new(
+        message: impl Into<String>,
+        exit_code: Option<i32>,
+        stderr: impl Into<String>,
+    ) -> Self {
         Self {
             message: message.into(),
             exit_code,
@@ -147,7 +151,7 @@ impl MessageParseError {
             data: None,
         }
     }
-    
+
     pub fn with_data(mut self, data: serde_json::Map<String, serde_json::Value>) -> Self {
         self.data = Some(data);
         self
@@ -160,12 +164,12 @@ where
     E: std::error::Error + 'static,
 {
     // Try downcasting to specific error types
-    if let Some(e) = (&err as &(dyn std::error::Error + 'static))
-        .downcast_ref::<CLIConnectionError>()
+    if let Some(e) =
+        (&err as &(dyn std::error::Error + 'static)).downcast_ref::<CLIConnectionError>()
     {
         return ClaudeSDKError::CLIConnection(CLIConnectionError::new(&e.message));
     }
-    
+
     ClaudeSDKError::Other(err.to_string())
 }
 

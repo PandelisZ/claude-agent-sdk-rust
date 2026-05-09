@@ -1,5 +1,18 @@
+use crate::error::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+
+pub mod messages;
+pub use messages::*;
+pub mod hooks;
+pub use hooks::*;
+pub mod config;
+pub use config::*;
+pub mod agent_options;
+pub use agent_options::*;
 
 // Enums and String Constants
 
@@ -10,6 +23,8 @@ pub enum PermissionMode {
     AcceptEdits,
     Plan,
     BypassPermissions,
+    DontAsk,
+    Auto,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +79,7 @@ pub enum TaskNotificationStatus {
 #[serde(rename_all = "camelCase")]
 pub enum RateLimitStatus {
     Allowed,
+    #[serde(alias = "allowed_warning")]
     AllowedWarning,
     Rejected,
 }
@@ -113,9 +129,7 @@ pub enum MCPServerConfig {
         headers: Option<HashMap<String, String>>,
     },
     #[serde(rename = "sdk")]
-    Sdk {
-        name: String,
-    },
+    Sdk { name: String },
 }
 
 // Simple Struct Types
@@ -134,6 +148,8 @@ pub struct SystemPromptPreset {
     pub preset: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub append: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exclude_dynamic_sections: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,6 +165,147 @@ pub struct ThinkingConfig {
     pub r#type: ThinkingConfigType,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub budget_tokens: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskBudget {
+    pub total: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionRuleValue {
+    pub tool_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule_content: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionUpdate {
+    pub r#type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rules: Option<Vec<PermissionRuleValue>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub behavior: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<PermissionMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub directories: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ToolPermissionContext {
+    pub suggestions: Vec<PermissionUpdate>,
+    pub tool_use_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub blocked_path: Option<String>,
+    pub decision_reason: Option<String>,
+    pub title: Option<String>,
+    pub display_name: Option<String>,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum PermissionResult {
+    Allow {
+        updated_input: Option<serde_json::Map<String, serde_json::Value>>,
+        updated_permissions: Option<Vec<PermissionUpdate>>,
+    },
+    Deny {
+        message: String,
+        interrupt: bool,
+    },
+}
+
+impl PermissionResult {
+    pub fn allow() -> Self {
+        Self::Allow {
+            updated_input: None,
+            updated_permissions: None,
+        }
+    }
+
+    pub fn deny(message: impl Into<String>) -> Self {
+        Self::Deny {
+            message: message.into(),
+            interrupt: false,
+        }
+    }
+}
+
+pub type CanUseToolFuture = Pin<Box<dyn Future<Output = Result<PermissionResult>> + Send>>;
+type CanUseToolFn = dyn Fn(
+        String,
+        serde_json::Map<String, serde_json::Value>,
+        ToolPermissionContext,
+    ) -> CanUseToolFuture
+    + Send
+    + Sync;
+
+#[derive(Clone)]
+pub struct CanUseToolCallback(Arc<CanUseToolFn>);
+
+impl std::fmt::Debug for CanUseToolCallback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("CanUseToolCallback")
+            .field(&"<callback>")
+            .finish()
+    }
+}
+
+impl CanUseToolCallback {
+    pub fn new<F, Fut>(callback: F) -> Self
+    where
+        F: Fn(String, serde_json::Map<String, serde_json::Value>, ToolPermissionContext) -> Fut
+            + Send
+            + Sync
+            + 'static,
+        Fut: Future<Output = Result<PermissionResult>> + Send + 'static,
+    {
+        Self(Arc::new(move |tool_name, input, context| {
+            Box::pin(callback(tool_name, input, context))
+        }))
+    }
+
+    pub async fn call(
+        &self,
+        tool_name: String,
+        input: serde_json::Map<String, serde_json::Value>,
+        context: ToolPermissionContext,
+    ) -> Result<PermissionResult> {
+        (self.0)(tool_name, input, context).await
+    }
+}
+
+type StderrFn = dyn Fn(String) + Send + Sync;
+
+#[derive(Clone)]
+pub struct StderrCallback(Arc<StderrFn>);
+
+impl std::fmt::Debug for StderrCallback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("StderrCallback")
+            .field(&"<callback>")
+            .finish()
+    }
+}
+
+impl StderrCallback {
+    pub fn new<F>(callback: F) -> Self
+    where
+        F: Fn(String) + Send + Sync + 'static,
+    {
+        Self(Arc::new(callback))
+    }
+
+    pub fn call(&self, line: String) {
+        (self.0)(line);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -211,9 +368,50 @@ pub struct MCPStatusResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TaskUsage {
+pub struct ContextUsageCategory {
+    pub name: String,
+    pub tokens: i32,
+    pub color: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_deferred: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextUsageResponse {
+    pub categories: Vec<ContextUsageCategory>,
     pub total_tokens: i32,
+    pub max_tokens: i32,
+    pub raw_max_tokens: i32,
+    pub percentage: f64,
+    pub model: String,
+    pub is_auto_compact_enabled: bool,
+    pub memory_files: Vec<serde_json::Map<String, serde_json::Value>>,
+    pub mcp_tools: Vec<serde_json::Map<String, serde_json::Value>>,
+    pub agents: Vec<serde_json::Map<String, serde_json::Value>>,
+    pub grid_rows: Vec<Vec<serde_json::Map<String, serde_json::Value>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_compact_threshold: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deferred_builtin_tools: Option<Vec<serde_json::Map<String, serde_json::Value>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_tools: Option<Vec<serde_json::Map<String, serde_json::Value>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_prompt_sections: Option<Vec<serde_json::Map<String, serde_json::Value>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slash_commands: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skills: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskUsage {
+    #[serde(alias = "total_tokens")]
+    pub total_tokens: i32,
+    #[serde(alias = "tool_uses")]
     pub tool_uses: i32,
+    #[serde(alias = "duration_ms")]
     pub duration_ms: i32,
 }
 
@@ -243,14 +441,9 @@ pub struct RateLimitInfo {
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum MCPServerStatusConfig {
     #[serde(rename = "sdk")]
-    Sdk {
-        name: String,
-    },
+    Sdk { name: String },
     #[serde(rename = "claudeai-proxy")]
-    ClaudeAiProxy {
-        url: String,
-        id: String,
-    },
+    ClaudeAiProxy { url: String, id: String },
     Sse {
         url: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -270,216 +463,4 @@ pub enum MCPServerStatusConfig {
         #[serde(skip_serializing_if = "Option::is_none")]
         env: Option<HashMap<String, String>>,
     },
-}
-
-// Content Block Types (tagged enum)
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ContentBlock {
-    Text {
-        text: String,
-    },
-    Thinking {
-        thinking: String,
-        signature: String,
-    },
-    ToolUse {
-        id: String,
-        name: String,
-        input: serde_json::Map<String, serde_json::Value>,
-    },
-    ToolResult {
-        tool_use_id: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        content: Option<serde_json::Value>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        is_error: Option<bool>,
-    },
-}
-
-// User Content Type
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UserContent {
-    pub kind: UserContentKind,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub blocks: Option<Vec<ContentBlock>>,
-}
-
-// Message Types (tagged enum - the main dispatch type)
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Message {
-    #[serde(rename = "user")]
-    UserMsg {
-        #[serde(rename = "message")]
-        content: UserContent,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        uuid: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        parent_tool_use_id: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        tool_use_result: Option<serde_json::Map<String, serde_json::Value>>,
-    },
-    #[serde(rename = "assistant")]
-    AssistantMsg {
-        #[serde(rename = "message")]
-        content: AssistantContent,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        parent_tool_use_id: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        error: Option<AssistantMessageErrorKind>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        usage: Option<serde_json::Map<String, serde_json::Value>>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        message_id: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        stop_reason: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        session_id: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        uuid: Option<String>,
-    },
-    #[serde(rename = "system")]
-    SystemMsg {
-        subtype: String,
-        #[serde(flatten)]
-        data: serde_json::Map<String, serde_json::Value>,
-    },
-    #[serde(rename = "result")]
-    ResultMsg {
-        subtype: String,
-        duration_ms: i32,
-        duration_api_ms: i32,
-        is_error: bool,
-        num_turns: i32,
-        session_id: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        stop_reason: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        total_cost_usd: Option<f64>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        usage: Option<serde_json::Map<String, serde_json::Value>>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        result: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        structured_output: Option<serde_json::Value>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        model_usage: Option<serde_json::Map<String, serde_json::Value>>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        permission_denials: Option<Vec<serde_json::Value>>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        uuid: Option<String>,
-    },
-    #[serde(rename = "stream_event")]
-    StreamEventMsg {
-        uuid: String,
-        session_id: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        event: Option<serde_json::Map<String, serde_json::Value>>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        parent_tool_use_id: Option<String>,
-    },
-    #[serde(rename = "rate_limit_event")]
-    RateLimitEventMsg {
-        rate_limit_info: RateLimitInfo,
-        uuid: String,
-        session_id: String,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AssistantContent {
-    pub content: Vec<ContentBlock>,
-    pub model: String,
-}
-
-// Typed System Message Subtypes
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TaskStartedMessage {
-    pub task_id: String,
-    pub description: String,
-    pub uuid: String,
-    pub session_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_use_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub task_type: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TaskProgressMessage {
-    pub task_id: String,
-    pub description: String,
-    pub usage: TaskUsage,
-    pub uuid: String,
-    pub session_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_use_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_tool_name: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TaskNotificationMessage {
-    pub task_id: String,
-    pub status: TaskNotificationStatus,
-    pub output_file: String,
-    pub summary: String,
-    pub uuid: String,
-    pub session_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_use_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub usage: Option<TaskUsage>,
-}
-
-// ClaudeAgentOptions
-
-#[derive(Debug, Clone, Default)]
-pub struct ClaudeAgentOptions {
-    pub tools: Vec<String>,
-    pub tools_preset: Option<ToolsPreset>,
-    pub allowed_tools: Vec<String>,
-    pub system_prompt: Option<String>,
-    pub system_prompt_preset: Option<SystemPromptPreset>,
-    pub system_prompt_file: Option<SystemPromptFile>,
-    pub mcp_servers: HashMap<String, MCPServerConfig>,
-    pub permission_mode: Option<PermissionMode>,
-    pub continue_conversation: bool,
-    pub resume: Option<String>,
-    pub fork_session: bool,
-    pub max_turns: Option<i32>,
-    pub max_budget_usd: Option<f64>,
-    pub disallowed_tools: Vec<String>,
-    pub model: Option<String>,
-    pub fallback_model: Option<String>,
-    pub betas: Vec<SdkBeta>,
-    pub permission_prompt_tool_name: Option<String>,
-    pub cwd: Option<String>,
-    pub cli_path: Option<String>,
-    pub settings: Option<String>,
-    pub add_dirs: Vec<String>,
-    pub env: HashMap<String, String>,
-    pub extra_args: HashMap<String, Option<String>>,
-    pub max_buffer_size: Option<usize>,
-    pub user: Option<String>,
-    pub include_partial_messages: bool,
-    pub setting_sources: Vec<SettingSource>,
-    pub plugins: Vec<SDKPluginConfig>,
-    pub max_thinking_tokens: Option<i32>,
-    pub thinking: Option<ThinkingConfig>,
-    pub effort: Option<String>,
-    pub output_format: Option<serde_json::Map<String, serde_json::Value>>,
-    pub enable_file_checkpointing: bool,
 }

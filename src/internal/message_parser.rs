@@ -43,9 +43,7 @@ pub enum StreamEvent {
         stop_reason: Option<String>,
     },
     /// Error event from the CLI
-    Error {
-        error: StreamError,
-    },
+    Error { error: StreamError },
 }
 
 /// Error details within a stream error event
@@ -180,8 +178,9 @@ impl<R: BufRead> SseStreamIterator<R> {
 
 /// Parse a JSON string into a `StreamEvent`
 fn parse_stream_event(json_str: &str) -> Result<StreamEvent, ClaudeSDKError> {
-    let value: serde_json::Value = serde_json::from_str(json_str)
-        .map_err(|e| ClaudeSDKError::CLIJSONDecode(crate::error::CLIJSONDecodeError::new(json_str, e)))?;
+    let value: serde_json::Value = serde_json::from_str(json_str).map_err(|e| {
+        ClaudeSDKError::CLIJSONDecode(crate::error::CLIJSONDecodeError::new(json_str, e))
+    })?;
 
     let event_type = value
         .get("type")
@@ -193,11 +192,9 @@ fn parse_stream_event(json_str: &str) -> Result<StreamEvent, ClaudeSDKError> {
         "token" => parse_token_event(value),
         "message_stop" => parse_message_stop_event(value),
         "error" => parse_error_event(value),
-        _ => Err(MessageParseError::new(format!(
-            "Unknown stream event type: {}",
-            event_type
-        ))
-        .into()),
+        _ => {
+            Err(MessageParseError::new(format!("Unknown stream event type: {}", event_type)).into())
+        }
     }
 }
 
@@ -207,7 +204,10 @@ fn parse_start_event(value: serde_json::Value) -> Result<StreamEvent, ClaudeSDKE
         .and_then(|v| v.as_str())
         .ok_or_else(|| MessageParseError::new("Start event missing 'uuid' field"))?;
 
-    let version = value.get("version").and_then(|v| v.as_str()).map(String::from);
+    let version = value
+        .get("version")
+        .and_then(|v| v.as_str())
+        .map(String::from);
 
     Ok(StreamEvent::Start {
         uuid: uuid.to_string(),
@@ -259,7 +259,10 @@ fn parse_error_event(value: serde_json::Value) -> Result<StreamEvent, ClaudeSDKE
         .ok_or_else(|| MessageParseError::new("Error object missing 'message' field"))?
         .to_string();
 
-    let code = error_obj.get("code").and_then(|v| v.as_str()).map(String::from);
+    let code = error_obj
+        .get("code")
+        .and_then(|v| v.as_str())
+        .map(String::from);
 
     Ok(StreamEvent::Error {
         error: StreamError { message, code },
@@ -360,7 +363,8 @@ mod tests {
 
     #[test]
     fn test_parse_error_event() {
-        let json = r#"{"type": "error", "error": {"message": "Something went wrong", "code": "E001"}}"#;
+        let json =
+            r#"{"type": "error", "error": {"message": "Something went wrong", "code": "E001"}}"#;
         let event = parse_stream_event(json).unwrap();
 
         match event {
@@ -385,9 +389,7 @@ data: {"type": "message_stop", "stop_reason": "end_turn"}
 "#;
 
         let cursor = Cursor::new(sse_data);
-        let events: Vec<StreamEvent> = parse_sse_stream(cursor)
-            .filter_map(|r| r.ok())
-            .collect();
+        let events: Vec<StreamEvent> = parse_sse_stream(cursor).filter_map(|r| r.ok()).collect();
 
         assert_eq!(events.len(), 3);
         assert!(matches!(events[0], StreamEvent::Start { .. }));
