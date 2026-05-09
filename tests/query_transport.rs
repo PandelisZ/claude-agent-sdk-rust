@@ -178,10 +178,9 @@ async fn query_stream_messages_with_transport_writes_streamed_prompt_frames() {
         }),
     ]);
 
-    let messages =
-        query_stream_messages_with_transport(stream, None, Box::new(transport))
-            .await
-            .expect("query");
+    let messages = query_stream_messages_with_transport(stream, None, Box::new(transport))
+        .await
+        .expect("query");
 
     assert!(messages
         .iter()

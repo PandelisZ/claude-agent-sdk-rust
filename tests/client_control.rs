@@ -11,6 +11,8 @@ struct MockState {
     writes: Vec<Vec<u8>>,
     scripted_messages: VecDeque<Vec<u8>>,
     initialized: bool,
+    auto_control_responses: bool,
+    auto_response_cursor: usize,
 }
 
 #[tokio::test]
@@ -131,6 +133,34 @@ impl Transport for MockTransport {
                 }))
                 .unwrap(),
             ));
+        }
+        if state.auto_control_responses {
+            while state.auto_response_cursor < state.writes.len() {
+                let index = state.auto_response_cursor;
+                state.auto_response_cursor += 1;
+                let Ok(value) = serde_json::from_slice::<serde_json::Value>(&state.writes[index])
+                else {
+                    continue;
+                };
+                if value.get("type").and_then(|value| value.as_str()) != Some("control_request") {
+                    continue;
+                }
+                let Some(request_id) = value.get("request_id").and_then(|value| value.as_str())
+                else {
+                    continue;
+                };
+                return Ok(Some(
+                    serde_json::to_vec(&serde_json::json!({
+                        "type": "control_response",
+                        "response": {
+                            "subtype": "success",
+                            "request_id": request_id,
+                            "response": {}
+                        }
+                    }))
+                    .unwrap(),
+                ));
+            }
         }
         Ok(state.scripted_messages.pop_front())
     }
@@ -360,6 +390,42 @@ async fn client_disconnect_is_python_compatible_abort_alias() {
 
     client.connect().await.expect("connect");
     client.disconnect().await.expect("disconnect");
+}
+
+#[tokio::test]
+async fn dynamic_control_methods_send_python_compatible_requests() {
+    let transport = MockTransport::default();
+    let state = transport.state.clone();
+    state.lock().unwrap().auto_control_responses = true;
+    let mut client =
+        ClaudeAgentClient::with_transport(ClaudeAgentOptions::default(), Box::new(transport))
+            .expect("client");
+
+    client.connect().await.expect("connect");
+    client
+        .set_permission_mode(claude_agent_sdk::PermissionMode::AcceptEdits)
+        .await
+        .expect("set permission mode");
+    client
+        .set_model(Some("claude-haiku-4-5-20251001".to_string()))
+        .await
+        .expect("set model");
+    client.set_model(None).await.expect("clear model");
+    client.interrupt().await.expect("interrupt");
+
+    let state = state.lock().unwrap();
+    let writes: Vec<serde_json::Value> = state
+        .writes
+        .iter()
+        .filter_map(|write| serde_json::from_slice(write).ok())
+        .collect();
+    assert_eq!(writes[1]["request"]["subtype"], "set_permission_mode");
+    assert_eq!(writes[1]["request"]["mode"], "acceptEdits");
+    assert_eq!(writes[2]["request"]["subtype"], "set_model");
+    assert_eq!(writes[2]["request"]["model"], "claude-haiku-4-5-20251001");
+    assert_eq!(writes[3]["request"]["subtype"], "set_model");
+    assert!(writes[3]["request"]["model"].is_null());
+    assert_eq!(writes[4]["request"]["subtype"], "interrupt");
 }
 
 #[tokio::test]
