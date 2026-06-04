@@ -1,14 +1,23 @@
-# Claude Agent SDK for Rust
+# claude-code-sdk-rust
 
-Rust bindings for the Claude Agent SDK protocol used by the Claude Code CLI.
+[![crates.io](https://img.shields.io/crates/v/claude-code-sdk-rust.svg)](https://crates.io/crates/claude-code-sdk-rust)
+[![docs.rs](https://docs.rs/claude-code-sdk-rust/badge.svg)](https://docs.rs/claude-code-sdk-rust)
+[![license](https://img.shields.io/crates/l/claude-code-sdk-rust.svg)](./LICENSE)
+
+An async Rust SDK for the Claude Code CLI.
+
+> **Crate name vs. import path:** this crate is published on crates.io as
+> **`claude-code-sdk-rust`**, but its library import path is **`claude_agent_sdk`**.
+> Add `claude-code-sdk-rust` to your `Cargo.toml` and write
+> `use claude_agent_sdk::...;` in your code.
 
 This crate provides a Tokio-native SDK for driving an authenticated local `claude` CLI process with typed options, message parsing, interactive sessions, control requests, SDK MCP servers, and local/session-store helpers. It is modeled after the Python `claude-agent-sdk` API while using Rust-native async, traits, and type-safe data structures.
 
 ## Status
 
-This repository is an SDK implementation, not an official Anthropic package. It targets parity with the Python Claude Agent SDK public behavior and is currently verified by the local test suite.
+This repository is an SDK implementation, not an official Anthropic package. It targets parity with the Python Claude Agent SDK public behavior and is verified by the local test suite.
 
-Verified before publication:
+Verification:
 
 ```bash
 cargo test
@@ -26,18 +35,32 @@ The normal test suite avoids paid/authenticated CLI calls. The ignored `e2e_cli`
 
 ## Installation
 
-Use the Git repository directly:
+Add the crate from crates.io:
 
 ```toml
 [dependencies]
-claude-agent-sdk = { git = "https://github.com/PandelisZ/claude-agent-sdk-rust" }
+claude-code-sdk-rust = "0.1"
+tokio = { version = "1", features = ["full"] }
+```
+
+Then import it through its library path, `claude_agent_sdk`:
+
+```rust
+use claude_agent_sdk::query;
 ```
 
 Optional OpenTelemetry propagation support:
 
 ```toml
 [dependencies]
-claude-agent-sdk = { git = "https://github.com/PandelisZ/claude-agent-sdk-rust", features = ["otel"] }
+claude-code-sdk-rust = { version = "0.1", features = ["otel"] }
+```
+
+Or track the development branch directly from Git:
+
+```toml
+[dependencies]
+claude-code-sdk-rust = { git = "https://github.com/PandelisZ/claude-agent-sdk-rust" }
 ```
 
 ## Quick start
