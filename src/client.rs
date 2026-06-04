@@ -56,6 +56,16 @@ impl std::fmt::Debug for ClaudeAgentClient {
 }
 
 impl ClaudeAgentClient {
+    /// Fire-and-forget streaming for a single prompt.
+    ///
+    /// Spawns a background task that creates a fresh client from `options`,
+    /// connects, and streams `content`, forwarding each [`StreamEvent`] to the
+    /// returned receiver. Unlike [`Self::stream_message`], this returns
+    /// immediately and the spawned task owns the client for the lifetime of the
+    /// stream, so the caller only needs to hold the receiver. Connection or
+    /// streaming failures are surfaced as a final [`StreamEvent::Error`].
+    ///
+    /// Must be called from within a Tokio runtime.
     pub fn spawn_stream_message(
         options: ClaudeAgentOptions,
         content: impl Into<String>,
