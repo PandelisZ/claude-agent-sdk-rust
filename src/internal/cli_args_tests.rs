@@ -5,6 +5,18 @@ use crate::types::{
     ThinkingConfig, ThinkingConfigType,
 };
 
+#[test]
+fn empty_tools_list_serializes_to_disable_all_tools_like_python_sdk() {
+    let args = args_for(ClaudeAgentOptions::builder().tools(Vec::new()).build());
+
+    assert_eq!(
+        args.windows(2)
+            .find(|window| window[0] == "--tools")
+            .map(|window| window[1].as_str()),
+        Some("")
+    );
+}
+
 fn args_for(options: ClaudeAgentOptions) -> Vec<String> {
     build_cli_args(&TransportOptions::from(&options)).expect("args")
 }

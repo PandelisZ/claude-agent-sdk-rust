@@ -35,6 +35,7 @@ pub struct SubprocessCLITransport {
 #[derive(Debug, Clone)]
 pub struct TransportOptions {
     pub tools: Vec<String>,
+    pub tools_set: bool,
     pub tools_preset: Option<crate::types::ToolsPreset>,
     pub allowed_tools: Vec<String>,
     pub system_prompt: Option<String>,
@@ -85,6 +86,7 @@ impl From<&ClaudeAgentOptions> for TransportOptions {
     fn from(opts: &ClaudeAgentOptions) -> Self {
         Self {
             tools: opts.tools.clone(),
+            tools_set: opts.tools_set,
             tools_preset: opts.tools_preset.clone(),
             allowed_tools: opts.allowed_tools.clone(),
             system_prompt: opts.system_prompt.clone(),

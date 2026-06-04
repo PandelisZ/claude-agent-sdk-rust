@@ -99,6 +99,11 @@ fn tool_to_wire(tool: &crate::mcp::MCPTool) -> Value {
             "idempotentHint": annotations.idempotent_hint,
             "openWorldHint": annotations.open_world_hint,
         });
+        if let Some(max_size) = annotations.max_result_size_chars {
+            value["_meta"] = serde_json::json!({
+                "anthropic/maxResultSizeChars": max_size,
+            });
+        }
     }
     value
 }
@@ -109,6 +114,21 @@ fn content_to_wire(content: MCPContent) -> Value {
         MCPContent::Image { data, mime_type } => {
             serde_json::json!({"type": "image", "data": data, "mimeType": mime_type})
         }
+        MCPContent::Audio { data, mime_type } => {
+            serde_json::json!({"type": "audio", "data": data, "mimeType": mime_type})
+        }
+        MCPContent::ResourceLink {
+            uri,
+            name,
+            description,
+            mime_type,
+        } => serde_json::json!({
+            "type": "resource_link",
+            "uri": uri,
+            "name": name,
+            "description": description,
+            "mimeType": mime_type,
+        }),
         MCPContent::Resource {
             uri,
             mime_type,

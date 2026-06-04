@@ -112,7 +112,7 @@ pub(crate) fn build_cli_args(options: &TransportOptions) -> Result<Vec<String>> 
         };
         args.push("--tools".to_string());
         args.push(preset_name.to_string());
-    } else if !options.tools.is_empty() {
+    } else if options.tools_set {
         args.push("--tools".to_string());
         args.push(options.tools.join(","));
     }

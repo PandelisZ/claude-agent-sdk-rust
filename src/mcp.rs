@@ -44,7 +44,7 @@ pub struct MCPTool {
 }
 
 /// Annotations for an MCP tool.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MCPToolAnnotations {
     #[serde(default)]
     pub title: Option<String>,
@@ -56,6 +56,8 @@ pub struct MCPToolAnnotations {
     pub idempotent_hint: bool,
     #[serde(default)]
     pub open_world_hint: bool,
+    #[serde(default)]
+    pub max_result_size_chars: Option<usize>,
 }
 
 /// Content block for MCP tool results.
@@ -66,6 +68,15 @@ pub enum MCPContent {
     Text { text: String },
     #[serde(rename = "image")]
     Image { data: String, mime_type: String },
+    #[serde(rename = "audio")]
+    Audio { data: String, mime_type: String },
+    #[serde(rename = "resource_link")]
+    ResourceLink {
+        uri: String,
+        name: Option<String>,
+        description: Option<String>,
+        mime_type: Option<String>,
+    },
     #[serde(rename = "resource")]
     Resource {
         uri: String,

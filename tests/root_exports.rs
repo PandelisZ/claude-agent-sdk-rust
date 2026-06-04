@@ -35,6 +35,7 @@ fn session_helpers_are_exported_at_crate_root() {
             destructive_hint: false,
             idempotent_hint: true,
             open_world_hint: false,
+            max_result_size_chars: None,
         },
         |_| Ok(Vec::<claude_agent_sdk::MCPContent>::new()),
     );

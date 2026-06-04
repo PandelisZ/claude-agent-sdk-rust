@@ -5,6 +5,7 @@ use super::*;
 #[derive(Debug, Clone)]
 pub struct ClaudeAgentOptions {
     pub tools: Vec<String>,
+    pub tools_set: bool,
     pub tools_preset: Option<ToolsPreset>,
     pub allowed_tools: Vec<String>,
     pub system_prompt: Option<String>,
@@ -59,6 +60,7 @@ impl Default for ClaudeAgentOptions {
     fn default() -> Self {
         Self {
             tools: Vec::new(),
+            tools_set: false,
             tools_preset: None,
             allowed_tools: Vec::new(),
             system_prompt: None,

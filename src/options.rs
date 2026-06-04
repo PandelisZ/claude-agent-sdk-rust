@@ -14,11 +14,13 @@ impl ClaudeAgentOptionsBuilder {
 
     pub fn tools(mut self, tools: Vec<String>) -> Self {
         self.options.tools = tools;
+        self.options.tools_set = true;
         self
     }
 
     pub fn tools_preset(mut self, preset: ToolsPreset) -> Self {
         self.options.tools_preset = Some(preset);
+        self.options.tools_set = false;
         self
     }
 
