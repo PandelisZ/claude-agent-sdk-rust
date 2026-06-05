@@ -256,3 +256,36 @@ fn parser_accepts_python_rate_limit_wire_values() {
         other => panic!("expected rate limit event, got {other:?}"),
     }
 }
+
+#[test]
+fn parser_accepts_string_tool_use_result_from_builtin_tool() {
+    // The CLI sometimes echoes a tool result as a bare string (e.g. a
+    // built-in tool's error text) instead of a structured object. The
+    // parser must tolerate this rather than failing with a serde
+    // "expected a map" error.
+    let raw = json!({
+        "type": "user",
+        "message": {"role": "user", "content": "ack"},
+        "tool_use_result": "Error: File does not exist. Note: your current working directory is /tmp",
+        "parent_tool_use_id": "toolu_42"
+    });
+
+    let parsed = parse_message_value(raw)
+        .expect("string tool_use_result must not be a parse error")
+        .unwrap();
+
+    match parsed {
+        Message::UserMsg {
+            tool_use_result, ..
+        } => {
+            assert_eq!(
+                tool_use_result.and_then(|value| value.as_str().map(str::to_string)),
+                Some(
+                    "Error: File does not exist. Note: your current working directory is /tmp"
+                        .to_string()
+                )
+            );
+        }
+        other => panic!("expected user message, got {other:?}"),
+    }
+}

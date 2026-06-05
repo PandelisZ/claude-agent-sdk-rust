@@ -56,7 +56,10 @@ pub enum Message {
         #[serde(skip_serializing_if = "Option::is_none")]
         parent_tool_use_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        tool_use_result: Option<serde_json::Map<String, serde_json::Value>>,
+        // The CLI may serialize a tool result as either a structured object or
+        // a bare string (e.g. a built-in tool's error text). Accept any JSON
+        // value so message parsing never fails on a string payload.
+        tool_use_result: Option<serde_json::Value>,
     },
     #[serde(rename = "assistant")]
     AssistantMsg {

@@ -56,6 +56,84 @@ impl std::fmt::Debug for ClaudeAgentClient {
 }
 
 impl ClaudeAgentClient {
+    pub fn spawn_stream_message(
+        options: ClaudeAgentOptions,
+        content: impl Into<String>,
+    ) -> mpsc::UnboundedReceiver<StreamEvent> {
+        let content = content.into();
+        let (tx, rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            if let Err(err) = Self::run_spawned_stream(options, content, tx.clone()).await {
+                let _ = tx.send(StreamEvent::Error(err.to_string()));
+            }
+        });
+        rx
+    }
+
+    async fn run_spawned_stream(
+        options: ClaudeAgentOptions,
+        content: String,
+        tx: mpsc::UnboundedSender<StreamEvent>,
+    ) -> Result<()> {
+        let mut client = Self::new(options)?;
+        client.connect().await?;
+        client.require_connected()?;
+        let payload = client.build_user_payload(&content, None)?;
+        let json_payload = serde_json::to_vec(&payload)?;
+        client.transport.write(&json_payload).await?;
+        client.transport.write(b"\n").await?;
+        {
+            let mut state = client.state.write().await;
+            state.is_streaming = true;
+        }
+        while let Some(data) = client.transport.read().await? {
+            let line = String::from_utf8_lossy(&data);
+            let value = serde_json::from_slice::<serde_json::Value>(&data)?;
+            if value.get("type").and_then(|v| v.as_str()) == Some("control_request") {
+                respond_to_control_request(
+                    client.transport.as_mut(),
+                    &value,
+                    &client.control_callbacks,
+                )
+                .await?;
+                continue;
+            }
+            if value.get("type").and_then(|v| v.as_str()) == Some("transcript_mirror") {
+                if let Some(batcher) = &mut client.transcript_mirror {
+                    for message in batcher.enqueue_value(&value).await? {
+                        let _ = tx.send(StreamEvent::Error(format!("{message:?}")));
+                    }
+                }
+                continue;
+            }
+            let Some(message) = parse_message_line(&line)? else {
+                continue;
+            };
+            for event in stream_events_from_message(&message, &client.session_id) {
+                let _ = tx.send(event);
+            }
+            let done = matches!(message, Message::ResultMsg { .. });
+            if done {
+                if let Some(batcher) = &mut client.transcript_mirror {
+                    for message in batcher.flush().await? {
+                        let _ = tx.send(StreamEvent::Error(format!("{message:?}")));
+                    }
+                }
+            }
+            {
+                let mut state = client.state.write().await;
+                state.messages.push(message);
+                if done {
+                    state.is_streaming = false;
+                }
+            }
+            if done {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     pub fn new(options: ClaudeAgentOptions) -> Result<Self> {
         validate_session_store_options(&options)?;
         let transport_options = TransportOptions::from(&options);
