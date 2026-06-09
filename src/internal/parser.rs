@@ -36,9 +36,33 @@ pub fn parse_message_value(value: serde_json::Value) -> Result<Option<Message>> 
         return parse_system_message_value(value);
     }
 
-    serde_json::from_value::<Message>(value)
-        .map(Some)
-        .map_err(ClaudeSDKError::Serialization)
+    match serde_json::from_value::<Message>(value.clone()) {
+        Ok(message) => Ok(Some(message)),
+        Err(err) => Err(parse_error_with_payload(err, &value)),
+    }
+}
+
+// Surface the offending payload alongside the serde error; a bare
+// "invalid type: sequence, expected a map" is undebuggable without it.
+fn parse_error_with_payload(err: serde_json::Error, value: &serde_json::Value) -> ClaudeSDKError {
+    let payload = value.to_string();
+    let payload = if payload.len() > 600 {
+        let cut = payload
+            .char_indices()
+            .take_while(|(idx, _)| *idx <= 600)
+            .last()
+            .map(|(idx, ch)| idx + ch.len_utf8())
+            .unwrap_or(payload.len());
+        format!("{}...", &payload[..cut])
+    } else {
+        payload
+    };
+    let mut error =
+        MessageParseError::new(format!("Failed to parse CLI message: {err}; payload: {payload}"));
+    if let Some(data) = value.as_object() {
+        error = error.with_data(data.clone());
+    }
+    ClaudeSDKError::MessageParse(error)
 }
 
 fn parse_system_message_value(value: serde_json::Value) -> Result<Option<Message>> {

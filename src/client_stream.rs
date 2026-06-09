@@ -115,7 +115,7 @@ pub(crate) fn stream_events_from_message(
             usage,
             model_usage,
             ..
-        } => vec![StreamEvent::Complete(MessageResponse {
+        } => vec![StreamEvent::TurnComplete(MessageResponse {
             content: String::new(),
             blocks: Vec::new(),
             model: String::new(),

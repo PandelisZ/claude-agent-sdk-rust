@@ -36,7 +36,13 @@ pub enum StreamEvent {
         is_error: Option<bool>,
     },
     RateLimit(RateLimitInfo),
+    /// A single assistant message (or usage-bearing message delta) finished.
+    /// Under partial messages a turn with tool calls emits several of these —
+    /// one per assistant message. Do NOT treat this as end-of-turn.
     Complete(MessageResponse),
+    /// The CLI's final result message: the whole turn (including any tool
+    /// calls and follow-up assistant messages) is done.
+    TurnComplete(MessageResponse),
     Error(String),
 }
 

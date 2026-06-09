@@ -106,8 +106,15 @@ impl ClaudeAgentClient {
                 }
                 continue;
             }
-            let Some(message) = parse_message_line(&line)? else {
-                continue;
+            let message = match parse_message_line(&line) {
+                Ok(Some(message)) => message,
+                Ok(None) => continue,
+                Err(err) => {
+                    // A single unrecognized message shape must not kill the
+                    // whole turn. Log it (payload included) and keep going.
+                    tracing::warn!("skipping unparseable CLI message: {err}");
+                    continue;
+                }
             };
             for event in stream_events_from_message(&message, &client.session_id) {
                 let _ = tx.send(event);
@@ -371,8 +378,15 @@ impl ClaudeAgentClient {
                 }
                 continue;
             }
-            let Some(message) = parse_message_line(&line)? else {
-                continue;
+            let message = match parse_message_line(&line) {
+                Ok(Some(message)) => message,
+                Ok(None) => continue,
+                Err(err) => {
+                    // A single unrecognized message shape must not kill the
+                    // whole turn. Log it (payload included) and keep going.
+                    tracing::warn!("skipping unparseable CLI message: {err}");
+                    continue;
+                }
             };
             let done = matches!(message, Message::ResultMsg { .. });
             if done {
@@ -432,8 +446,15 @@ impl ClaudeAgentClient {
                 }
                 continue;
             }
-            let Some(message) = parse_message_line(&line)? else {
-                continue;
+            let message = match parse_message_line(&line) {
+                Ok(Some(message)) => message,
+                Ok(None) => continue,
+                Err(err) => {
+                    // A single unrecognized message shape must not kill the
+                    // whole turn. Log it (payload included) and keep going.
+                    tracing::warn!("skipping unparseable CLI message: {err}");
+                    continue;
+                }
             };
             for event in stream_events_from_message(&message, &self.session_id) {
                 let _ = tx.send(event);
