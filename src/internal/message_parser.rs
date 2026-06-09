@@ -95,7 +95,7 @@ pub fn parse_line(line: &str) -> Result<ParsedLine, ClaudeSDKError> {
 ///
 /// ```rust,ignore
 /// use std::io::BufReader;
-/// use claude_agent_sdk::internal::message_parser::parse_sse_stream;
+/// use claude_code_sdk_rust::internal::message_parser::parse_sse_stream;
 ///
 /// let reader = BufReader::new(stream);
 /// for event in parse_sse_stream(reader) {

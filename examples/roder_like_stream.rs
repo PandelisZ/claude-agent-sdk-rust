@@ -1,7 +1,7 @@
 // Mirrors how Roder's claude-code provider drives the SDK: an in-process SDK
 // MCP server exposing a read_file tool, built-ins disabled, partial messages.
-use claude_agent_sdk::mcp::{create_sdk_mcp_server, MCPContent, SdkMcpTool};
-use claude_agent_sdk::{ClaudeAgentClient, ClaudeAgentOptions, PermissionResult, StreamEvent};
+use claude_code_sdk_rust::mcp::{create_sdk_mcp_server, MCPContent, SdkMcpTool};
+use claude_code_sdk_rust::{ClaudeAgentClient, ClaudeAgentOptions, PermissionResult, StreamEvent};
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {

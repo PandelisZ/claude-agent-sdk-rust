@@ -1,7 +1,7 @@
-use claude_agent_sdk::{AssistantContent, ContentBlock, Message, UserContent};
+use claude_code_sdk_rust::{AssistantContent, ContentBlock, Message, UserContent};
 use serde_json::json;
 
-use claude_agent_sdk::internal::parser::parse_message_value;
+use claude_code_sdk_rust::internal::parser::parse_message_value;
 
 #[test]
 fn deserializes_user_message_from_cli_wire_shape() {

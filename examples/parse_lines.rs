@@ -1,4 +1,4 @@
-use claude_agent_sdk::internal::parser::parse_message_line;
+use claude_code_sdk_rust::internal::parser::parse_message_line;
 
 fn main() {
     let path = std::env::args().nth(1).expect("path to jsonl");

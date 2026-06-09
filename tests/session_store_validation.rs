@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use claude_agent_sdk::internal::session_store_validation::validate_session_store_options;
-use claude_agent_sdk::{
+use claude_code_sdk_rust::internal::session_store_validation::validate_session_store_options;
+use claude_code_sdk_rust::{
     list_sessions_from_store, ClaudeAgentClient, ClaudeAgentOptions, InMemorySessionStore,
     SessionKey, SessionStore, SessionStoreEntry, SessionStoreHandle, SessionStoreListEntry,
 };
@@ -20,14 +20,14 @@ impl SessionStore for MinimalStore {
         &self,
         _key: SessionKey,
         _entries: Vec<SessionStoreEntry>,
-    ) -> claude_agent_sdk::Result<()> {
+    ) -> claude_code_sdk_rust::Result<()> {
         Ok(())
     }
 
     async fn load(
         &self,
         _key: SessionKey,
-    ) -> claude_agent_sdk::Result<Option<Vec<SessionStoreEntry>>> {
+    ) -> claude_code_sdk_rust::Result<Option<Vec<SessionStoreEntry>>> {
         Ok(None)
     }
 }
@@ -42,16 +42,16 @@ impl SessionStore for FlakyListStore {
         &self,
         _key: SessionKey,
         _entries: Vec<SessionStoreEntry>,
-    ) -> claude_agent_sdk::Result<()> {
+    ) -> claude_code_sdk_rust::Result<()> {
         Ok(())
     }
 
     async fn load(
         &self,
         key: SessionKey,
-    ) -> claude_agent_sdk::Result<Option<Vec<SessionStoreEntry>>> {
+    ) -> claude_code_sdk_rust::Result<Option<Vec<SessionStoreEntry>>> {
         if key.session_id == self.bad_session_id {
-            return Err(claude_agent_sdk::ClaudeSDKError::Session(
+            return Err(claude_code_sdk_rust::ClaudeSDKError::Session(
                 "backend down".to_string(),
             ));
         }
@@ -70,7 +70,7 @@ impl SessionStore for FlakyListStore {
     async fn list_sessions(
         &self,
         _project_key: &str,
-    ) -> claude_agent_sdk::Result<Vec<SessionStoreListEntry>> {
+    ) -> claude_code_sdk_rust::Result<Vec<SessionStoreListEntry>> {
         Ok(vec![
             SessionStoreListEntry {
                 session_id: self.good_session_id.clone(),

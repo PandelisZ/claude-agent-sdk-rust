@@ -1,7 +1,7 @@
 use async_trait::async_trait;
-use claude_agent_sdk::internal::transport::Transport;
-use claude_agent_sdk::session_store::{InMemorySessionStore, SessionKey, SessionStore};
-use claude_agent_sdk::{ClaudeAgentClient, ClaudeAgentOptions, Message, Result, StreamEvent};
+use claude_code_sdk_rust::internal::transport::Transport;
+use claude_code_sdk_rust::session_store::{InMemorySessionStore, SessionKey, SessionStore};
+use claude_code_sdk_rust::{ClaudeAgentClient, ClaudeAgentOptions, Message, Result, StreamEvent};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
@@ -403,7 +403,7 @@ async fn dynamic_control_methods_send_python_compatible_requests() {
 
     client.connect().await.expect("connect");
     client
-        .set_permission_mode(claude_agent_sdk::PermissionMode::AcceptEdits)
+        .set_permission_mode(claude_code_sdk_rust::PermissionMode::AcceptEdits)
         .await
         .expect("set permission mode");
     client
@@ -492,7 +492,7 @@ async fn client_receive_response_answers_can_use_tool_control_requests() {
                 Some("pwd")
             );
             assert_eq!(context.tool_use_id.as_deref(), Some("toolu_1"));
-            Ok(claude_agent_sdk::PermissionResult::allow())
+            Ok(claude_code_sdk_rust::PermissionResult::allow())
         })
         .build();
     let mut client = ClaudeAgentClient::with_transport(options, Box::new(transport)).unwrap();
@@ -634,7 +634,7 @@ async fn client_stream_message_answers_can_use_tool_control_requests() {
                 Some("Cargo.toml")
             );
             assert_eq!(context.tool_use_id.as_deref(), Some("toolu_stream"));
-            Ok(claude_agent_sdk::PermissionResult::allow())
+            Ok(claude_code_sdk_rust::PermissionResult::allow())
         })
         .build();
     let mut client = ClaudeAgentClient::with_transport(options, Box::new(transport)).unwrap();

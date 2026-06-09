@@ -1,4 +1,4 @@
-use claude_agent_sdk::{query, ClaudeAgentClient, ClaudeAgentOptions, StreamEvent};
+use claude_code_sdk_rust::{query, ClaudeAgentClient, ClaudeAgentOptions, StreamEvent};
 
 const CLAUDE_HAIKU_4_5_MODEL: &str = "claude-haiku-4-5-20251001";
 const CLAUDE_FABLE_5_MODEL: &str = "claude-fable-5";

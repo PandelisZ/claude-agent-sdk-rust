@@ -45,10 +45,10 @@ claude-agent-sdk = { git = "https://github.com/PandelisZ/claude-agent-sdk-rust",
 ### One-shot query
 
 ```rust
-use claude_agent_sdk::query;
+use claude_code_sdk_rust::query;
 
 #[tokio::main]
-async fn main() -> claude_agent_sdk::Result<()> {
+async fn main() -> claude_code_sdk_rust::Result<()> {
     let result = query("Explain ownership in Rust in two sentences.", None).await?;
     println!("{}", result.content);
     Ok(())
@@ -58,10 +58,10 @@ async fn main() -> claude_agent_sdk::Result<()> {
 ### Full message sequence
 
 ```rust
-use claude_agent_sdk::query_messages;
+use claude_code_sdk_rust::query_messages;
 
 #[tokio::main]
-async fn main() -> claude_agent_sdk::Result<()> {
+async fn main() -> claude_code_sdk_rust::Result<()> {
     let messages = query_messages("List the files you would inspect first.", None).await?;
 
     for message in messages {
@@ -75,10 +75,10 @@ async fn main() -> claude_agent_sdk::Result<()> {
 ### Streamed one-shot input
 
 ```rust
-use claude_agent_sdk::query_stream_messages;
+use claude_code_sdk_rust::query_stream_messages;
 
 #[tokio::main]
-async fn main() -> claude_agent_sdk::Result<()> {
+async fn main() -> claude_code_sdk_rust::Result<()> {
     let stream = futures::stream::iter(vec![
         serde_json::json!({
             "type": "user",
@@ -101,10 +101,10 @@ async fn main() -> claude_agent_sdk::Result<()> {
 The interactive client mirrors the Python SDK's explicit connection model: create the client, call `connect()`, send prompts or control requests, receive messages, then `disconnect()` or `close()`.
 
 ```rust
-use claude_agent_sdk::{ClaudeAgentClient, ClaudeAgentOptions, PermissionMode};
+use claude_code_sdk_rust::{ClaudeAgentClient, ClaudeAgentOptions, PermissionMode};
 
 #[tokio::main]
-async fn main() -> claude_agent_sdk::Result<()> {
+async fn main() -> claude_code_sdk_rust::Result<()> {
     let options = ClaudeAgentOptions::builder()
         .model("claude-sonnet-4-20250514")
         .permission_mode(PermissionMode::AcceptEdits)
@@ -135,10 +135,10 @@ client.connect_with_stream(prompt_stream).await?;
 ## Streaming responses
 
 ```rust
-use claude_agent_sdk::{ClaudeAgentClient, ClaudeAgentOptions, StreamEvent};
+use claude_code_sdk_rust::{ClaudeAgentClient, ClaudeAgentOptions, StreamEvent};
 
 #[tokio::main]
-async fn main() -> claude_agent_sdk::Result<()> {
+async fn main() -> claude_code_sdk_rust::Result<()> {
     let mut client = ClaudeAgentClient::new(ClaudeAgentOptions::default())?;
     client.connect().await?;
 
@@ -162,7 +162,7 @@ async fn main() -> claude_agent_sdk::Result<()> {
 Use `ClaudeAgentOptions::builder()` for ergonomic configuration.
 
 ```rust
-use claude_agent_sdk::{
+use claude_code_sdk_rust::{
     ClaudeAgentOptions, MCPServerConfig, PermissionMode, SettingSource, SkillsConfig,
 };
 use std::collections::HashMap;
@@ -210,7 +210,7 @@ Supported option areas include:
 The crate can host in-process SDK MCP tools and bridge them through Claude Code control requests.
 
 ```rust
-use claude_agent_sdk::{create_sdk_mcp_server, tool, ClaudeAgentOptions, MCPContent};
+use claude_code_sdk_rust::{create_sdk_mcp_server, tool, ClaudeAgentOptions, MCPContent};
 
 let server = create_sdk_mcp_server(
     "local-tools",
@@ -239,7 +239,7 @@ Use `create_sdk_mcp_server_with_version` and `tool_with_annotations` when the CL
 ## Permission callbacks
 
 ```rust
-use claude_agent_sdk::{ClaudeAgentOptions, PermissionResult};
+use claude_code_sdk_rust::{ClaudeAgentOptions, PermissionResult};
 
 let options = ClaudeAgentOptions::builder()
     .can_use_tool(|tool_name, input, _context| async move {
@@ -259,7 +259,7 @@ let options = ClaudeAgentOptions::builder()
 Hooks are represented as callback matchers grouped by event name.
 
 ```rust
-use claude_agent_sdk::{ClaudeAgentOptions, HookCallback, HookMatcher};
+use claude_code_sdk_rust::{ClaudeAgentOptions, HookCallback, HookMatcher};
 
 let callback = HookCallback::new(|input, _tool_use_id, _context| async move {
     println!("hook input: {input:?}");
@@ -274,13 +274,13 @@ let options = ClaudeAgentOptions::builder()
 
 ## Sessions
 
-Local Claude transcript helpers are available from the crate root and from `claude_agent_sdk::sessions`.
+Local Claude transcript helpers are available from the crate root and from `claude_code_sdk_rust::sessions`.
 
 ```rust
-use claude_agent_sdk::{get_session_info, get_session_messages, list_sessions};
+use claude_code_sdk_rust::{get_session_info, get_session_messages, list_sessions};
 
 #[tokio::main]
-async fn main() -> claude_agent_sdk::Result<()> {
+async fn main() -> claude_code_sdk_rust::Result<()> {
     let sessions = list_sessions(None).await?;
 
     for session in sessions {
@@ -311,7 +311,7 @@ Implement `SessionStore` for external persistence. Stores can opt into session l
 
 ```rust
 use async_trait::async_trait;
-use claude_agent_sdk::{
+use claude_code_sdk_rust::{
     Result, SessionKey, SessionListSubkeysKey, SessionStore, SessionStoreEntry,
     SessionStoreListEntry,
 };
@@ -352,7 +352,7 @@ impl SessionStore for MyStore {
 
 ## Error handling
 
-Most functions return `claude_agent_sdk::Result<T>`, an alias for `Result<T, ClaudeSDKError>`.
+Most functions return `claude_code_sdk_rust::Result<T>`, an alias for `Result<T, ClaudeSDKError>`.
 
 Main error variants include:
 

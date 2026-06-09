@@ -1,7 +1,7 @@
-use claude_agent_sdk::session_store::{
+use claude_code_sdk_rust::session_store::{
     project_key_for_directory, InMemorySessionStore, SessionKey, SessionStore,
 };
-use claude_agent_sdk::sessions::{
+use claude_code_sdk_rust::sessions::{
     delete_session_via_store, fork_session_via_store, get_session_info_from_store,
     get_session_messages_from_store, get_subagent_messages_from_store, list_sessions_from_store,
     list_subagents_from_store, rename_session_via_store, tag_session_via_store,
@@ -59,7 +59,7 @@ async fn lists_sessions_from_store_using_summary_sidecars() {
         )
         .await
         .unwrap();
-    let handle = claude_agent_sdk::session_store::SessionStoreHandle::new(store);
+    let handle = claude_code_sdk_rust::session_store::SessionStoreHandle::new(store);
 
     let sessions = list_sessions_from_store(&handle, Some(cwd.to_str().unwrap()), None, 0)
         .await
@@ -101,7 +101,7 @@ async fn gets_info_and_messages_from_store() {
         )
         .await
         .unwrap();
-    let handle = claude_agent_sdk::session_store::SessionStoreHandle::new(store);
+    let handle = claude_code_sdk_rust::session_store::SessionStoreHandle::new(store);
 
     let info = get_session_info_from_store(&handle, &session_id, Some(cwd.to_str().unwrap()))
         .await
@@ -135,7 +135,7 @@ async fn gets_info_and_messages_from_store() {
 #[tokio::test]
 async fn invalid_store_session_id_returns_empty_results() {
     let handle =
-        claude_agent_sdk::session_store::SessionStoreHandle::new(InMemorySessionStore::new());
+        claude_code_sdk_rust::session_store::SessionStoreHandle::new(InMemorySessionStore::new());
 
     assert!(
         get_session_info_from_store(&handle, "../../etc/passwd", None)
@@ -170,7 +170,7 @@ async fn mutates_store_session_metadata_and_delete() {
         )
         .await
         .unwrap();
-    let handle = claude_agent_sdk::session_store::SessionStoreHandle::new(store);
+    let handle = claude_code_sdk_rust::session_store::SessionStoreHandle::new(store);
 
     rename_session_via_store(
         &handle,
@@ -257,7 +257,7 @@ async fn lists_and_reads_subagent_messages_from_store() {
         )
         .await
         .unwrap();
-    let handle = claude_agent_sdk::session_store::SessionStoreHandle::new(store);
+    let handle = claude_code_sdk_rust::session_store::SessionStoreHandle::new(store);
 
     let subagents = list_subagents_from_store(&handle, &session_id, Some(cwd.to_str().unwrap()))
         .await
@@ -304,7 +304,7 @@ async fn forks_store_session_with_new_session_and_message_ids() {
         )
         .await
         .unwrap();
-    let handle = claude_agent_sdk::session_store::SessionStoreHandle::new(store);
+    let handle = claude_code_sdk_rust::session_store::SessionStoreHandle::new(store);
 
     let fork = fork_session_via_store(
         &handle,

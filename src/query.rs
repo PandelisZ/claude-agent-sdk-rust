@@ -49,7 +49,7 @@ pub struct QueryResult {
 /// # Example
 ///
 /// ```rust
-/// use claude_agent_sdk::query;
+/// use claude_code_sdk_rust::query;
 ///
 /// async fn example() -> Result<(), Box<dyn std::error::Error>> {
 ///     let result = query("What is Rust?", None).await?;

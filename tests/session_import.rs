@@ -1,4 +1,4 @@
-use claude_agent_sdk::{
+use claude_code_sdk_rust::{
     import_session_to_store, project_key_for_directory, ImportSessionOptions, InMemorySessionStore,
     SessionKey, SessionStore, SessionStoreHandle,
 };
@@ -189,7 +189,7 @@ async fn imports_subagents_and_meta_sidecars() {
     );
     assert_eq!(
         store
-            .list_subkeys(claude_agent_sdk::SessionListSubkeysKey {
+            .list_subkeys(claude_code_sdk_rust::SessionListSubkeysKey {
                 project_key: project_key_for_directory(Some(&cwd)),
                 session_id: SESSION_ID.to_string(),
             })
@@ -226,7 +226,7 @@ async fn include_subagents_false_skips_subagents() {
     .unwrap();
 
     assert!(store
-        .list_subkeys(claude_agent_sdk::SessionListSubkeysKey {
+        .list_subkeys(claude_code_sdk_rust::SessionListSubkeysKey {
             project_key: project_key_for_directory(Some(&cwd)),
             session_id: SESSION_ID.to_string(),
         })

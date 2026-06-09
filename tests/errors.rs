@@ -1,4 +1,4 @@
-use claude_agent_sdk::{
+use claude_code_sdk_rust::{
     CLIConnectionError, CLIJSONDecodeError, CLINotFoundError, ClaudeSDKError, ProcessError,
 };
 

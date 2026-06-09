@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use claude_agent_sdk::internal::transport::Transport;
-use claude_agent_sdk::{
+use claude_code_sdk_rust::internal::transport::Transport;
+use claude_code_sdk_rust::{
     create_sdk_mcp_server, query_messages_with_transport, query_stream_messages_with_transport,
     tool, ClaudeAgentOptions, Message, Result,
 };
@@ -110,7 +110,7 @@ async fn query_messages_with_transport_answers_post_prompt_sdk_mcp_control_reque
                     .get("name")
                     .and_then(|value| value.as_str())
                     .unwrap_or("there");
-                Ok(vec![claude_agent_sdk::MCPContent::Text {
+                Ok(vec![claude_code_sdk_rust::MCPContent::Text {
                     text: format!("Hello, {name}!"),
                 }])
             },

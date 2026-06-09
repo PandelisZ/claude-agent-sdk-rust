@@ -1,4 +1,4 @@
-use claude_agent_sdk::sessions::{
+use claude_code_sdk_rust::sessions::{
     delete_session, fork_session, get_session_info, get_session_messages, get_subagent_messages,
     list_sessions, list_subagents, rename_session, tag_session, ListSessionsOptions,
     SessionMutationOptions, SessionQueryOptions,
@@ -308,12 +308,12 @@ async fn local_sessions_scope_queries_to_directory_and_page_messages() {
     let session_b = uuid::Uuid::new_v4().to_string();
     let project_a_dir = config
         .join("projects")
-        .join(claude_agent_sdk::project_key_for_directory(Some(
+        .join(claude_code_sdk_rust::project_key_for_directory(Some(
             &project_a,
         )));
     let project_b_dir = config
         .join("projects")
-        .join(claude_agent_sdk::project_key_for_directory(Some(
+        .join(claude_code_sdk_rust::project_key_for_directory(Some(
             &project_b,
         )));
 
@@ -368,7 +368,7 @@ async fn local_sessions_fork_remaps_ids_and_supports_slice_title() {
     let u2 = uuid::Uuid::new_v4().to_string();
     let project_dir = config
         .join("projects")
-        .join(claude_agent_sdk::project_key_for_directory(Some(&project)));
+        .join(claude_code_sdk_rust::project_key_for_directory(Some(&project)));
     write_jsonl(
         &project_dir.join(format!("{session_id}.jsonl")),
         &[

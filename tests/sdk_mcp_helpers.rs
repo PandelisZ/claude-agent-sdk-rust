@@ -1,4 +1,4 @@
-use claude_agent_sdk::{
+use claude_code_sdk_rust::{
     create_sdk_mcp_server, create_sdk_mcp_server_with_version, tool, tool_with_annotations,
     MCPContent, MCPToolAnnotations,
 };
@@ -43,7 +43,7 @@ fn sdk_mcp_server_version_is_reported_during_initialize() {
     let server = create_sdk_mcp_server_with_version("people", "2.0.0", Vec::new());
     let servers = std::collections::HashMap::from([("people".to_string(), server)]);
 
-    let response = claude_agent_sdk::internal::sdk_mcp::answer_mcp_message(
+    let response = claude_code_sdk_rust::internal::sdk_mcp::answer_mcp_message(
         &servers,
         "people",
         &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
@@ -75,7 +75,7 @@ fn sdk_mcp_tool_helper_accepts_annotations() {
     let server = create_sdk_mcp_server("people", vec![inspect]);
     let servers = std::collections::HashMap::from([("people".to_string(), server)]);
 
-    let response = claude_agent_sdk::internal::sdk_mcp::answer_mcp_message(
+    let response = claude_code_sdk_rust::internal::sdk_mcp::answer_mcp_message(
         &servers,
         "people",
         &json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
@@ -107,7 +107,7 @@ fn sdk_mcp_tool_errors_are_returned_as_tool_results() {
     let server = create_sdk_mcp_server("people", vec![fail]);
     let servers = std::collections::HashMap::from([("people".to_string(), server)]);
 
-    let response = claude_agent_sdk::internal::sdk_mcp::answer_mcp_message(
+    let response = claude_code_sdk_rust::internal::sdk_mcp::answer_mcp_message(
         &servers,
         "people",
         &json!({
@@ -140,7 +140,7 @@ fn sdk_mcp_resource_content_uses_mcp_resource_shape() {
     let server = create_sdk_mcp_server("people", vec![readme]);
     let servers = std::collections::HashMap::from([("people".to_string(), server)]);
 
-    let response = claude_agent_sdk::internal::sdk_mcp::answer_mcp_message(
+    let response = claude_code_sdk_rust::internal::sdk_mcp::answer_mcp_message(
         &servers,
         "people",
         &json!({
@@ -185,7 +185,7 @@ fn sdk_mcp_additional_content_types_match_mcp_wire_shapes() {
     let server = create_sdk_mcp_server("people", vec![media]);
     let servers = std::collections::HashMap::from([("people".to_string(), server)]);
 
-    let response = claude_agent_sdk::internal::sdk_mcp::answer_mcp_message(
+    let response = claude_code_sdk_rust::internal::sdk_mcp::answer_mcp_message(
         &servers,
         "people",
         &json!({

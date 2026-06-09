@@ -1,4 +1,4 @@
-use claude_agent_sdk::{
+use claude_code_sdk_rust::{
     create_sdk_mcp_server, create_sdk_mcp_server_with_version, delete_session,
     delete_session_via_store, fork_session, fork_session_via_store, get_session_info,
     get_session_info_from_store, get_session_messages, get_session_messages_from_store,
@@ -37,12 +37,12 @@ fn session_helpers_are_exported_at_crate_root() {
             open_world_hint: false,
             max_result_size_chars: None,
         },
-        |_| Ok(Vec::<claude_agent_sdk::MCPContent>::new()),
+        |_| Ok(Vec::<claude_code_sdk_rust::MCPContent>::new()),
     );
     let _sdk_server = create_sdk_mcp_server("sdk-server", Vec::new());
     let _versioned_sdk_server =
         create_sdk_mcp_server_with_version("sdk-server", "2.0.0", Vec::new());
-    let http_config = claude_agent_sdk::mcp::MCPServerConfig::Http {
+    let http_config = claude_code_sdk_rust::mcp::MCPServerConfig::Http {
         url: "https://example.com/mcp".to_string(),
         headers: std::collections::HashMap::new(),
     };

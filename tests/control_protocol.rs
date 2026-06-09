@@ -1,11 +1,11 @@
 use async_trait::async_trait;
-use claude_agent_sdk::internal::control::{
+use claude_code_sdk_rust::internal::control::{
     control_request_payload, initialize_request, send_control_request_with_callbacks,
     ControlCallbacks,
 };
-use claude_agent_sdk::internal::transport::Transport;
-use claude_agent_sdk::mcp::{MCPContent, MCPTool, SimpleMCPServer};
-use claude_agent_sdk::{
+use claude_code_sdk_rust::internal::transport::Transport;
+use claude_code_sdk_rust::mcp::{MCPContent, MCPTool, SimpleMCPServer};
+use claude_code_sdk_rust::{
     AgentDefinition, HookCallback, HookMatcher, PermissionMode, PermissionResult, Result,
     SettingSource, SkillsConfig, SystemPromptPreset,
 };
@@ -98,7 +98,7 @@ fn builds_control_request_payload() {
 
 #[test]
 fn initialize_request_includes_agents_dynamic_prompt_and_skill_filter() {
-    let options = claude_agent_sdk::ClaudeAgentOptions::builder()
+    let options = claude_code_sdk_rust::ClaudeAgentOptions::builder()
         .system_prompt_preset(SystemPromptPreset {
             r#type: "preset".to_string(),
             preset: "claude_code".to_string(),
@@ -137,7 +137,7 @@ fn initialize_request_includes_agents_dynamic_prompt_and_skill_filter() {
     assert_eq!(request["agents"]["reviewer"]["mcpServers"][0], "github");
     assert_eq!(request["agents"]["reviewer"]["permissionMode"], "plan");
 
-    let all_skills_options = claude_agent_sdk::ClaudeAgentOptions {
+    let all_skills_options = claude_code_sdk_rust::ClaudeAgentOptions {
         skills: Some(SkillsConfig::All),
         ..Default::default()
     };
@@ -195,7 +195,7 @@ async fn unsupported_inbound_control_request_gets_error_response() {
 #[tokio::test]
 async fn can_use_tool_control_request_can_allow() {
     let callback =
-        claude_agent_sdk::CanUseToolCallback::new(|tool_name, input, context| async move {
+        claude_code_sdk_rust::CanUseToolCallback::new(|tool_name, input, context| async move {
             assert_eq!(tool_name, "Bash");
             assert_eq!(input.get("command").and_then(|v| v.as_str()), Some("pwd"));
             assert_eq!(context.tool_use_id.as_deref(), Some("toolu_1"));
@@ -239,7 +239,7 @@ async fn can_use_tool_control_request_can_allow() {
 
 #[tokio::test]
 async fn can_use_tool_control_request_can_deny() {
-    let callback = claude_agent_sdk::CanUseToolCallback::new(|_, _, _| async move {
+    let callback = claude_code_sdk_rust::CanUseToolCallback::new(|_, _, _| async move {
         Ok(PermissionResult::Deny {
             message: "no".to_string(),
             interrupt: true,
@@ -325,7 +325,7 @@ async fn sdk_mcp_control_request_answers_tools_list() {
 
 #[tokio::test]
 async fn hook_callback_request_invokes_registered_callback() {
-    let options = claude_agent_sdk::ClaudeAgentOptions::builder()
+    let options = claude_code_sdk_rust::ClaudeAgentOptions::builder()
         .hook(
             "PreToolUse",
             HookMatcher::new(HookCallback::new(|input, tool_use_id, _| async move {

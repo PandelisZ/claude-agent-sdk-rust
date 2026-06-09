@@ -1,9 +1,9 @@
-use claude_agent_sdk::{query_messages, ClaudeAgentClient, ClaudeAgentOptions};
+use claude_code_sdk_rust::{query_messages, ClaudeAgentClient, ClaudeAgentOptions};
 
 #[test]
 fn can_use_tool_rejects_explicit_permission_prompt_tool_name() {
     let options = ClaudeAgentOptions::builder()
-        .can_use_tool(|_, _, _| async { Ok(claude_agent_sdk::PermissionResult::allow()) })
+        .can_use_tool(|_, _, _| async { Ok(claude_code_sdk_rust::PermissionResult::allow()) })
         .permission_prompt_tool_name("custom")
         .build();
 
@@ -16,7 +16,7 @@ fn can_use_tool_rejects_explicit_permission_prompt_tool_name() {
 #[tokio::test]
 async fn query_messages_rejects_can_use_tool_with_string_prompt() {
     let options = ClaudeAgentOptions::builder()
-        .can_use_tool(|_, _, _| async { Ok(claude_agent_sdk::PermissionResult::allow()) })
+        .can_use_tool(|_, _, _| async { Ok(claude_code_sdk_rust::PermissionResult::allow()) })
         .build();
 
     let err = query_messages("hello", Some(options))
