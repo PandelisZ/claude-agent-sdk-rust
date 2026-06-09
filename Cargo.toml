@@ -1,11 +1,22 @@
 [package]
-name = "claude-agent-sdk"
+name = "claude-code-sdk-rust"
 version = "0.2.0"
 edition = "2021"
-authors = ["Pandelis Z <pandelis@example.com>"]
-description = "Rust SDK for Claude CLI"
+authors = ["Pandelis Zembashis <p@ndel.is>"]
+description = "Async Rust SDK for the Claude Code CLI: streaming agent turns, tool use, and sessions."
 license = "MIT"
 repository = "https://github.com/PandelisZ/claude-agent-sdk-rust"
+homepage = "https://github.com/PandelisZ/claude-agent-sdk-rust"
+documentation = "https://docs.rs/claude-code-sdk-rust"
+readme = "README.md"
+keywords = ["claude", "anthropic", "agent", "sdk", "ai"]
+categories = ["api-bindings", "asynchronous"]
+
+# Published as `claude-code-sdk-rust` (the name `claude-agent-sdk` is taken on
+# crates.io), but the library keeps the `claude_agent_sdk` import path so
+# existing `use claude_agent_sdk::...` code compiles unchanged.
+[lib]
+name = "claude_agent_sdk"
 
 [dependencies]
 tokio = { version = "1", features = ["process", "io-util", "sync", "rt-multi-thread", "time", "fs", "macros"] }
