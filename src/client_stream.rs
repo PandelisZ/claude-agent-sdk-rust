@@ -247,13 +247,7 @@ mod tests {
             .expect("expected a Complete event");
 
         let usage = complete.usage.as_ref().expect("usage should be present");
-        assert_eq!(
-            usage.get("input_tokens").and_then(|v| v.as_i64()),
-            Some(11)
-        );
-        assert_eq!(
-            usage.get("output_tokens").and_then(|v| v.as_i64()),
-            Some(7)
-        );
+        assert_eq!(usage.get("input_tokens").and_then(|v| v.as_i64()), Some(11));
+        assert_eq!(usage.get("output_tokens").and_then(|v| v.as_i64()), Some(7));
     }
 }
