@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (pre-1.0: breaking changes bump the minor version).
 
+## [0.3.1] - 2026-06-22
+
+### Added
+
+- End-to-end test coverage (all `#[ignore]`d; require an authenticated `claude`
+  CLI and incur API usage):
+  - `tests/e2e_tool_use.rs` — in-process SDK MCP tool dispatch, built-in Bash
+    tool execution, `get_mcp_status` control round-trip, and interactive
+    multi-turn context retention.
+  - `tests/e2e_web_tools.rs` — built-in `WebSearch` and `WebFetch` tool
+    invocation with live result round-tripping.
+
+### Notes
+
+- No library/runtime changes; this release only adds opt-in e2e tests, so it is
+  API-compatible with `0.3.0`.
+
 ## [0.3.0] - 2026-06-22
 
 Upstream parity pass against the Python `claude-agent-sdk` **v0.2.106**
