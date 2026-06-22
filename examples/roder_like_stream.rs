@@ -30,7 +30,7 @@ async fn main() {
     let options = ClaudeAgentOptions::builder()
         .model("claude-fable-5")
         .include_partial_messages(true)
-        .effort("high")
+        .effort(claude_code_sdk_rust::EffortLevel::High)
         .sdk_mcp_server("roder", server)
         .tools(Vec::new())
         .allowed_tools(vec!["mcp__roder__read_file".to_string()])

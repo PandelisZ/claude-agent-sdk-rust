@@ -1,7 +1,8 @@
 use claude_code_sdk_rust::{
-    AgentDefinition, ClaudeAgentOptions, ContentBlock, MCPServerConnectionStatus, MCPServerStatus,
-    MCPServerStatusConfig, MCPStatusResponse, PermissionMode, PermissionRuleValue,
-    PermissionUpdate, SettingSource,
+    AgentDefinition, ClaudeAgentOptions, ContentBlock, EffortLevel, HookInput,
+    MCPServerConnectionStatus, MCPServerStatus, MCPServerStatusConfig, MCPStatusResponse,
+    NotificationHookSpecificOutput, PermissionMode, PermissionRuleValue, PermissionUpdate,
+    PreCompactHookInput, PreToolUseHookInput, ServerToolName, SettingSource,
 };
 
 #[test]
@@ -230,4 +231,118 @@ fn mcp_status_types_accept_python_wire_shapes() {
     }))
     .unwrap();
     assert_eq!(response.mcp_servers.len(), 2);
+}
+
+#[test]
+fn effort_level_serializes_to_python_literal_strings() {
+    // EffortLevel mirrors the upstream Literal["low","medium","high","xhigh","max"].
+    for (level, wire) in [
+        (EffortLevel::Low, "low"),
+        (EffortLevel::Medium, "medium"),
+        (EffortLevel::High, "high"),
+        (EffortLevel::Xhigh, "xhigh"),
+        (EffortLevel::Max, "max"),
+    ] {
+        assert_eq!(serde_json::to_value(level).unwrap(), serde_json::json!(wire));
+        assert_eq!(level.as_cli(), wire);
+        let parsed: EffortLevel = serde_json::from_value(serde_json::json!(wire)).unwrap();
+        assert_eq!(parsed, level);
+    }
+
+    // The builder stores the typed effort on the options.
+    let options = ClaudeAgentOptions::builder().effort(EffortLevel::Xhigh).build();
+    assert_eq!(options.effort, Some(EffortLevel::Xhigh));
+}
+
+#[test]
+fn server_tool_name_round_trips_and_is_forward_compatible() {
+    // Known names map to typed variants on the wire.
+    let known: ServerToolName = serde_json::from_value(serde_json::json!("web_search")).unwrap();
+    assert_eq!(known, ServerToolName::WebSearch);
+    assert_eq!(serde_json::to_value(&known).unwrap(), serde_json::json!("web_search"));
+    assert_eq!(known.as_str(), "web_search");
+
+    // Unknown names are preserved (forward-compatible) rather than failing.
+    let unknown: ServerToolName =
+        serde_json::from_value(serde_json::json!("future_tool")).unwrap();
+    assert_eq!(unknown, ServerToolName::Other("future_tool".to_string()));
+    assert_eq!(
+        serde_json::to_value(&unknown).unwrap(),
+        serde_json::json!("future_tool")
+    );
+
+    // A server_tool_use content block carries the typed name.
+    let block: ContentBlock = serde_json::from_value(serde_json::json!({
+        "type": "server_tool_use",
+        "id": "srvtoolu_1",
+        "name": "web_fetch",
+        "input": {"url": "https://example.com"}
+    }))
+    .unwrap();
+    match block {
+        ContentBlock::ServerToolUse { name, .. } => assert_eq!(name, ServerToolName::WebFetch),
+        other => panic!("expected server_tool_use, got {other:?}"),
+    }
+}
+
+#[test]
+fn hook_input_deserializes_python_wire_shapes() {
+    // PreToolUse carries flattened base fields plus tool fields and is
+    // discriminated by hook_event_name.
+    let raw = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "session_id": "sess-1",
+        "transcript_path": "/tmp/t.jsonl",
+        "cwd": "/work",
+        "permission_mode": "default",
+        "tool_name": "Bash",
+        "tool_input": {"command": "ls"},
+        "tool_use_id": "toolu_1",
+        "agent_id": "agent-9"
+    });
+    let input: HookInput = serde_json::from_value(raw).unwrap();
+    match input {
+        HookInput::PreToolUse(PreToolUseHookInput {
+            base,
+            tool_name,
+            tool_use_id,
+            agent_id,
+            ..
+        }) => {
+            assert_eq!(base.session_id, "sess-1");
+            assert_eq!(base.cwd, "/work");
+            assert_eq!(base.permission_mode.as_deref(), Some("default"));
+            assert_eq!(tool_name, "Bash");
+            assert_eq!(tool_use_id, "toolu_1");
+            assert_eq!(agent_id.as_deref(), Some("agent-9"));
+        }
+        other => panic!("expected PreToolUse, got {other:?}"),
+    }
+
+    // PreCompact carries an explicit null custom_instructions.
+    let compact: PreCompactHookInput = serde_json::from_value(serde_json::json!({
+        "session_id": "sess-1",
+        "transcript_path": "/tmp/t.jsonl",
+        "cwd": "/work",
+        "trigger": "auto",
+        "custom_instructions": null
+    }))
+    .unwrap();
+    assert_eq!(compact.trigger, "auto");
+    assert!(compact.custom_instructions.is_none());
+}
+
+#[test]
+fn hook_specific_output_uses_camel_case_keys() {
+    let output = NotificationHookSpecificOutput {
+        additional_context: Some("note".to_string()),
+    };
+    assert_eq!(
+        serde_json::to_value(&output).unwrap(),
+        serde_json::json!({"additionalContext": "note"})
+    );
+
+    // Omitted optional fields do not appear on the wire.
+    let empty = NotificationHookSpecificOutput::default();
+    assert_eq!(serde_json::to_value(&empty).unwrap(), serde_json::json!({}));
 }

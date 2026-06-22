@@ -1,6 +1,6 @@
 [package]
 name = "claude-code-sdk-rust"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 authors = ["Pandelis Zembashis <p@ndel.is>"]
 description = "Async Rust SDK for the Claude Code CLI: streaming agent turns, tool use, and sessions."
@@ -11,6 +11,7 @@ documentation = "https://docs.rs/claude-code-sdk-rust"
 readme = "README.md"
 keywords = ["claude", "anthropic", "agent", "sdk", "ai"]
 categories = ["api-bindings", "asynchronous"]
+exclude = [".agents/", ".github/"]
 
 [dependencies]
 tokio = { version = "1", features = ["process", "io-util", "sync", "rt-multi-thread", "time", "fs", "macros"] }

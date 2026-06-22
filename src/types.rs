@@ -49,6 +49,34 @@ pub enum ThinkingConfigType {
     Disabled,
 }
 
+/// Controls how much effort Claude puts into its response.
+///
+/// Mirrors the upstream Python `EffortLevel` literal
+/// (`"low" | "medium" | "high" | "xhigh" | "max"`). Serializes to the bare
+/// lowercase string the CLI expects for `--effort`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EffortLevel {
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
+
+impl EffortLevel {
+    /// The bare string value passed to the `--effort` CLI flag.
+    pub fn as_cli(&self) -> &'static str {
+        match self {
+            EffortLevel::Low => "low",
+            EffortLevel::Medium => "medium",
+            EffortLevel::High => "high",
+            EffortLevel::Xhigh => "xhigh",
+            EffortLevel::Max => "max",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum UserContentKind {

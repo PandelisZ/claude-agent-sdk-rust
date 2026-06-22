@@ -43,7 +43,7 @@ pub struct ClaudeAgentOptions {
     pub plugins: Vec<SDKPluginConfig>,
     pub max_thinking_tokens: Option<i32>,
     pub thinking: Option<ThinkingConfig>,
-    pub effort: Option<String>,
+    pub effort: Option<EffortLevel>,
     pub output_format: Option<serde_json::Map<String, serde_json::Value>>,
     pub enable_file_checkpointing: bool,
     pub stderr: Option<StderrCallback>,

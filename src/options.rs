@@ -298,8 +298,8 @@ impl ClaudeAgentOptionsBuilder {
         self
     }
 
-    pub fn effort(mut self, effort: impl Into<String>) -> Self {
-        self.options.effort = Some(effort.into());
+    pub fn effort(mut self, effort: EffortLevel) -> Self {
+        self.options.effort = Some(effort);
         self
     }
 

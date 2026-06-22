@@ -1,5 +1,67 @@
 use serde::{Deserialize, Serialize};
 
+/// Names of server-side tools the API executes on the model's behalf.
+///
+/// Mirrors the upstream Python `ServerToolName` literal. Deserializes
+/// forward-compatibly: any unrecognized name is preserved in
+/// [`ServerToolName::Other`] rather than failing to parse.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
+pub enum ServerToolName {
+    Advisor,
+    WebSearch,
+    WebFetch,
+    CodeExecution,
+    BashCodeExecution,
+    TextEditorCodeExecution,
+    ToolSearchToolRegex,
+    ToolSearchToolBm25,
+    /// A server tool name not known at build time (forward-compatible).
+    Other(String),
+}
+
+impl ServerToolName {
+    /// The wire string for this server tool name.
+    pub fn as_str(&self) -> &str {
+        match self {
+            ServerToolName::Advisor => "advisor",
+            ServerToolName::WebSearch => "web_search",
+            ServerToolName::WebFetch => "web_fetch",
+            ServerToolName::CodeExecution => "code_execution",
+            ServerToolName::BashCodeExecution => "bash_code_execution",
+            ServerToolName::TextEditorCodeExecution => "text_editor_code_execution",
+            ServerToolName::ToolSearchToolRegex => "tool_search_tool_regex",
+            ServerToolName::ToolSearchToolBm25 => "tool_search_tool_bm25",
+            ServerToolName::Other(name) => name.as_str(),
+        }
+    }
+}
+
+impl From<String> for ServerToolName {
+    fn from(value: String) -> Self {
+        match value.as_str() {
+            "advisor" => ServerToolName::Advisor,
+            "web_search" => ServerToolName::WebSearch,
+            "web_fetch" => ServerToolName::WebFetch,
+            "code_execution" => ServerToolName::CodeExecution,
+            "bash_code_execution" => ServerToolName::BashCodeExecution,
+            "text_editor_code_execution" => ServerToolName::TextEditorCodeExecution,
+            "tool_search_tool_regex" => ServerToolName::ToolSearchToolRegex,
+            "tool_search_tool_bm25" => ServerToolName::ToolSearchToolBm25,
+            _ => ServerToolName::Other(value),
+        }
+    }
+}
+
+impl From<ServerToolName> for String {
+    fn from(value: ServerToolName) -> Self {
+        match value {
+            ServerToolName::Other(name) => name,
+            other => other.as_str().to_string(),
+        }
+    }
+}
+
 use super::{
     AssistantMessageErrorKind, RateLimitInfo, TaskNotificationStatus, TaskUpdatedStatus, TaskUsage,
 };
@@ -28,7 +90,7 @@ pub enum ContentBlock {
     },
     ServerToolUse {
         id: String,
-        name: String,
+        name: ServerToolName,
         input: serde_json::Map<String, serde_json::Value>,
     },
     #[serde(rename = "advisor_tool_result")]

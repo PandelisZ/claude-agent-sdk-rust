@@ -290,3 +290,17 @@ fn session_store_enables_session_mirror_flag() {
 
     assert!(args.iter().any(|arg| arg == "--session-mirror"));
 }
+
+#[test]
+fn serializes_effort_level_as_cli_wire_value() {
+    use crate::types::EffortLevel;
+
+    let args = args_for(ClaudeAgentOptions::builder().effort(EffortLevel::Xhigh).build());
+
+    assert_eq!(
+        args.windows(2)
+            .find(|window| window[0] == "--effort")
+            .map(|window| window[1].as_str()),
+        Some("xhigh")
+    );
+}

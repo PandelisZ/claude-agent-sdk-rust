@@ -110,7 +110,7 @@ async fn real_claude_cli_fable_5_streaming_smoke() {
     let options = ClaudeAgentOptions::builder()
         .model(CLAUDE_FABLE_5_MODEL)
         .include_partial_messages(true)
-        .effort("medium")
+        .effort(claude_code_sdk_rust::EffortLevel::Medium)
         .max_turns(1)
         .build();
     let mut events =

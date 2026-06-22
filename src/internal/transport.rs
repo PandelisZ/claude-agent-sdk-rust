@@ -73,7 +73,7 @@ pub struct TransportOptions {
     pub plugins: Vec<crate::types::SDKPluginConfig>,
     pub max_thinking_tokens: Option<i32>,
     pub thinking: Option<crate::types::ThinkingConfig>,
-    pub effort: Option<String>,
+    pub effort: Option<crate::types::EffortLevel>,
     pub output_format: Option<serde_json::Map<String, serde_json::Value>>,
     pub enable_file_checkpointing: bool,
     pub stderr: Option<crate::types::StderrCallback>,

@@ -274,9 +274,9 @@ pub(crate) fn build_cli_args(options: &TransportOptions) -> Result<Vec<String>> 
         args.push(tokens.to_string());
     }
 
-    if let Some(ref effort) = options.effort {
+    if let Some(effort) = options.effort {
         args.push("--effort".to_string());
-        args.push(effort.clone());
+        args.push(effort.as_cli().to_string());
     }
 
     if let Some(ref output_format) = options.output_format {

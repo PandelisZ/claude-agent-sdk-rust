@@ -28,11 +28,17 @@ pub(crate) fn stream_events_from_message(
                             signature: Some(signature.clone()),
                         });
                     }
-                    ContentBlock::ToolUse { id, name, input }
-                    | ContentBlock::ServerToolUse { id, name, input } => {
+                    ContentBlock::ToolUse { id, name, input } => {
                         events.push(StreamEvent::ToolUseStart {
                             id: id.clone(),
                             name: name.clone(),
+                            input: input.clone(),
+                        });
+                    }
+                    ContentBlock::ServerToolUse { id, name, input } => {
+                        events.push(StreamEvent::ToolUseStart {
+                            id: id.clone(),
+                            name: name.as_str().to_string(),
                             input: input.clone(),
                         });
                     }
