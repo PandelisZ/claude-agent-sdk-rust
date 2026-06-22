@@ -1,7 +1,7 @@
 use crate::error::{ClaudeSDKError, MessageParseError, Result};
 use crate::types::{
     HookEventMessage, Message, MirrorErrorMessage, TaskNotificationMessage, TaskProgressMessage,
-    TaskStartedMessage,
+    TaskStartedMessage, TaskUpdatedMessage,
 };
 
 const KNOWN_MESSAGE_TYPES: &[&str] = &[
@@ -77,6 +77,9 @@ fn parse_system_message_value(value: serde_json::Value) -> Result<Option<Message
         Some("task_notification") => parse_task_notification(value)
             .map(Message::TaskNotificationMsg)
             .map(Some),
+        Some("task_updated") => parse_task_updated(value)
+            .map(Message::TaskUpdatedMsg)
+            .map(Some),
         Some("hook_started" | "hook_response") => {
             parse_hook_event(value).map(Message::HookEventMsg).map(Some)
         }
@@ -116,6 +119,45 @@ fn parse_task_progress(value: serde_json::Value) -> Result<TaskProgressMessage> 
 fn parse_task_notification(value: serde_json::Value) -> Result<TaskNotificationMessage> {
     serde_json::from_value::<TaskNotificationMessage>(strip_system_fields(value)?)
         .map_err(ClaudeSDKError::Serialization)
+}
+
+// Parsed defensively: a terminal task completion sometimes arrives only as a
+// `task_updated` patch (no separate `task_notification`), and the patch may omit
+// uuid/session_id. `status` is derived from `patch.status` (the CLI sets it on
+// terminal transitions); an unrecognized status falls back to `None` while the
+// full patch is preserved on `.patch` for callers that need more.
+fn parse_task_updated(value: serde_json::Value) -> Result<TaskUpdatedMessage> {
+    let data = value.as_object().ok_or_else(|| {
+        ClaudeSDKError::MessageParse(MessageParseError::new("System message must be an object"))
+    })?;
+    let task_id = data
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let patch = data
+        .get("patch")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
+    let status = patch.get("status").and_then(|v| {
+        serde_json::from_value::<crate::types::TaskUpdatedStatus>(v.clone()).ok()
+    });
+    let session_id = data
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let uuid = data
+        .get("uuid")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    Ok(TaskUpdatedMessage {
+        task_id,
+        patch,
+        status,
+        session_id,
+        uuid,
+    })
 }
 
 fn parse_hook_event(value: serde_json::Value) -> Result<HookEventMessage> {

@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use super::{AssistantMessageErrorKind, RateLimitInfo, TaskNotificationStatus, TaskUsage};
+use super::{
+    AssistantMessageErrorKind, RateLimitInfo, TaskNotificationStatus, TaskUpdatedStatus, TaskUsage,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -92,6 +94,8 @@ pub enum Message {
     TaskProgressMsg(TaskProgressMessage),
     #[serde(skip_serializing, skip_deserializing)]
     TaskNotificationMsg(TaskNotificationMessage),
+    #[serde(skip_serializing, skip_deserializing)]
+    TaskUpdatedMsg(TaskUpdatedMessage),
     #[serde(skip_serializing, skip_deserializing)]
     HookEventMsg(HookEventMessage),
     #[serde(skip_serializing, skip_deserializing)]
@@ -219,6 +223,30 @@ pub struct TaskNotificationMessage {
     pub tool_use_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<TaskUsage>,
+}
+
+/// System message emitted when a background task's state changes
+/// (`system`/`task_updated`).
+///
+/// `patch` carries the changed fields (e.g. `status`, `end_time`); when
+/// `patch.status` is terminal (see [`super::TERMINAL_TASK_STATUSES`]) the task
+/// has finished. A background task's terminal state can arrive *only* as a
+/// `TaskUpdatedMessage` with no accompanying `TaskNotificationMessage`, so
+/// consumers tracking active task IDs should clear them on a terminal status
+/// from either message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskUpdatedMessage {
+    #[serde(alias = "task_id")]
+    pub task_id: String,
+    pub patch: serde_json::Map<String, serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<TaskUpdatedStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(alias = "session_id")]
+    pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uuid: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

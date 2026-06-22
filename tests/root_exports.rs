@@ -110,4 +110,11 @@ fn session_helpers_are_exported_at_crate_root() {
     assert_eq!(payload["isAutoCompactEnabled"], true);
     assert_eq!(payload["deferredBuiltinTools"], serde_json::json!([]));
     assert!(!VERSION.is_empty());
+
+    // task_updated lifecycle exports (upstream parity).
+    let _ = std::mem::size_of::<claude_code_sdk_rust::TaskUpdatedMessage>();
+    let _ = std::mem::size_of::<claude_code_sdk_rust::TaskUpdatedStatus>();
+    assert!(claude_code_sdk_rust::is_terminal_task_status("completed"));
+    assert!(!claude_code_sdk_rust::is_terminal_task_status("running"));
+    assert!(claude_code_sdk_rust::TERMINAL_TASK_STATUSES.contains(&"killed"));
 }

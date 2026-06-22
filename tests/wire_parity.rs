@@ -1,4 +1,6 @@
-use claude_code_sdk_rust::{AssistantContent, ContentBlock, Message, UserContent};
+use claude_code_sdk_rust::{
+    AssistantContent, ContentBlock, Message, TaskUpdatedStatus, UserContent,
+};
 use serde_json::json;
 
 use claude_code_sdk_rust::internal::parser::parse_message_value;
@@ -167,6 +169,60 @@ fn parser_returns_typed_task_system_messages() {
             assert_eq!(message.last_tool_name.as_deref(), Some("Read"));
         }
         other => panic!("expected task progress message, got {other:?}"),
+    }
+}
+
+#[test]
+fn parser_returns_typed_task_updated_message_with_status_from_patch() {
+    let raw = json!({
+        "type": "system",
+        "subtype": "task_updated",
+        "task_id": "task-xyz",
+        "patch": {"status": "killed", "end_time": 1234},
+        "session_id": "session-1",
+        "uuid": "uuid-9"
+    });
+
+    let parsed = parse_message_value(raw)
+        .expect("valid task_updated message")
+        .unwrap();
+
+    match parsed {
+        Message::TaskUpdatedMsg(message) => {
+            assert_eq!(message.task_id, "task-xyz");
+            // status is derived from patch.status, not a top-level field.
+            assert_eq!(message.status, Some(TaskUpdatedStatus::Killed));
+            assert_eq!(message.patch["end_time"], 1234);
+            assert_eq!(message.session_id.as_deref(), Some("session-1"));
+            assert_eq!(message.uuid.as_deref(), Some("uuid-9"));
+            // `killed` is terminal across both lifecycle vocabularies.
+            assert!(claude_code_sdk_rust::is_terminal_task_status("killed"));
+        }
+        other => panic!("expected task_updated message, got {other:?}"),
+    }
+}
+
+#[test]
+fn parser_task_updated_tolerates_missing_status_and_ids() {
+    let raw = json!({
+        "type": "system",
+        "subtype": "task_updated",
+        "task_id": "task-xyz",
+        "patch": {"end_time": 1234}
+    });
+
+    let parsed = parse_message_value(raw)
+        .expect("valid task_updated message")
+        .unwrap();
+
+    match parsed {
+        Message::TaskUpdatedMsg(message) => {
+            assert_eq!(message.task_id, "task-xyz");
+            assert_eq!(message.status, None);
+            assert_eq!(message.session_id, None);
+            assert_eq!(message.uuid, None);
+        }
+        other => panic!("expected task_updated message, got {other:?}"),
     }
 }
 

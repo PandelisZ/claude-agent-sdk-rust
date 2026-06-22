@@ -75,6 +75,35 @@ pub enum TaskNotificationStatus {
     Stopped,
 }
 
+/// Status values reported inside a `task_updated` patch.
+///
+/// `pending`/`running`/`paused` are non-terminal; `completed`/`failed`/`killed`
+/// are terminal. Note `task_updated` reports the raw `killed`; the CLI maps that
+/// to `stopped` only when it emits a `task_notification`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskUpdatedStatus {
+    Pending,
+    Running,
+    Paused,
+    Completed,
+    Failed,
+    Killed,
+}
+
+/// Task statuses that mean the task has finished and should be cleared from any
+/// "active task" tracking. Spans both lifecycle vocabularies: `task_notification`
+/// reports `stopped` (the CLI's mapped form of a killed task) while `task_updated`
+/// reports the raw `killed`. Consumers should treat the status of a
+/// `TaskNotificationMessage` and a `TaskUpdatedMessage` the same way.
+pub const TERMINAL_TASK_STATUSES: [&str; 4] = ["completed", "failed", "stopped", "killed"];
+
+/// Returns `true` when `status` is a terminal task status (see
+/// [`TERMINAL_TASK_STATUSES`]).
+pub fn is_terminal_task_status(status: &str) -> bool {
+    TERMINAL_TASK_STATUSES.contains(&status)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RateLimitStatus {
