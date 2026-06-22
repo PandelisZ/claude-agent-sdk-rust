@@ -28,26 +28,10 @@ ThinkingConfigEnabled	mapped	ThinkingConfig{ type: Enabled }
 ThinkingConfigDisabled	mapped	ThinkingConfig{ type: Disabled }
 PermissionResultAllow	mapped	PermissionResult::Allow
 PermissionResultDeny	mapped	PermissionResult::Deny
-HookInput	mapped	HookEventMessage (generic; see deferred per-event inputs)
-BaseHookInput	mapped	HookEventMessage (generic)
 HookContext	mapped	HookContext in types/hooks.rs
 HookCallback	mapped	HookCallback in types/hooks.rs
-HookJSONOutput	mapped	hook output handled as serde_json::Value in hooks.rs
+HookJSONOutput	mapped	hook output handled as serde_json::Value; typed *HookSpecificOutput structs in hooks.rs
 
 # --- deferred: genuine gaps, represented generically today ---
-EffortLevel	deferred	upstream Literal[low|medium|high|xhigh|max] + int; Rust effort: Option<String>/raw JSON. Add typed enum in types/agent_options.rs + cli_args.rs.
-ServerToolName	deferred	upstream Literal of 8 server-tool names; Rust ServerToolUse.name is String. Add enum in types/messages.rs.
-PreToolUseHookInput	deferred	per-event typed hook input; Rust uses generic HookEventMessage.
-PostToolUseHookInput	deferred	per-event typed hook input.
-PostToolUseFailureHookInput	deferred	per-event typed hook input.
-PostToolUseFailureHookSpecificOutput	deferred	per-event typed hook output.
-UserPromptSubmitHookInput	deferred	per-event typed hook input.
-StopHookInput	deferred	per-event typed hook input.
-SubagentStopHookInput	deferred	per-event typed hook input.
-PreCompactHookInput	deferred	per-event typed hook input.
-NotificationHookInput	deferred	per-event typed hook input.
-SubagentStartHookInput	deferred	per-event typed hook input.
-PermissionRequestHookInput	deferred	per-event typed hook input.
-NotificationHookSpecificOutput	deferred	per-event typed hook output.
-SubagentStartHookSpecificOutput	deferred	per-event typed hook output.
-PermissionRequestHookSpecificOutput	deferred	per-event typed hook output.
+# (none - the v0.2.106 hook-input/output, EffortLevel and ServerToolName gaps
+#  were ported to typed Rust forms; see UPSTREAM_BASELINE.md sync log.)
