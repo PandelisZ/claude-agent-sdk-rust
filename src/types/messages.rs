@@ -332,3 +332,165 @@ pub struct MirrorErrorMessage {
     pub error: String,
     pub data: serde_json::Map<String, serde_json::Value>,
 }
+
+// ---------------------------------------------------------------------------
+// User-supplied prompt input (text + images)
+// ---------------------------------------------------------------------------
+
+/// Source of an image supplied as part of a user prompt.
+///
+/// Serializes to the Claude Code stream-json image-source shape, matching the
+/// Anthropic Messages API: a tagged `base64` source carries `media_type` plus
+/// raw base64 `data`, while a `url` source references a remote image.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ImageSource {
+    Base64 {
+        media_type: String,
+        data: String,
+    },
+    Url {
+        url: String,
+    },
+}
+
+impl ImageSource {
+    /// Parse a `data:<media_type>;base64,<data>` URL into a base64 image source.
+    ///
+    /// Returns `None` for inputs that are not base64-encoded `data:` URLs
+    /// (e.g. remote `http(s)` URLs), which callers should route through
+    /// [`ImageSource::Url`] or skip.
+    pub fn from_data_url(url: &str) -> Option<Self> {
+        let rest = url.strip_prefix("data:")?;
+        let (meta, data) = rest.split_once(',')?;
+        let meta = meta.strip_suffix(";base64")?;
+        let media_type = if meta.is_empty() {
+            "image/png".to_string()
+        } else {
+            meta.to_string()
+        };
+        Some(ImageSource::Base64 {
+            media_type,
+            data: data.to_string(),
+        })
+    }
+}
+
+/// A single block of user-supplied prompt content.
+///
+/// The Claude Code CLI accepts a user message whose `content` is either a
+/// plain string or an array of these blocks; image blocks are the only way to
+/// deliver real image input to the model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum InputContentBlock {
+    Text { text: String },
+    Image { source: ImageSource },
+}
+
+impl InputContentBlock {
+    pub fn text(text: impl Into<String>) -> Self {
+        InputContentBlock::Text { text: text.into() }
+    }
+
+    pub fn image(source: ImageSource) -> Self {
+        InputContentBlock::Image { source }
+    }
+}
+
+/// User prompt content: either a plain string or a list of content blocks.
+///
+/// Passed to the streaming/query entrypoints. A plain string preserves the
+/// historical text-only behaviour; the block form carries text and images
+/// together so multimodal prompts reach the CLI as a real content array.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UserMessageInput {
+    Text(String),
+    Blocks(Vec<InputContentBlock>),
+}
+
+impl UserMessageInput {
+    /// True when this input carries no text and no blocks.
+    pub fn is_empty(&self) -> bool {
+        match self {
+            UserMessageInput::Text(text) => text.is_empty(),
+            UserMessageInput::Blocks(blocks) => blocks.is_empty(),
+        }
+    }
+
+    /// Render the value placed under the user message's `content` field: a JSON
+    /// string for text input, or a JSON array of content blocks otherwise.
+    pub fn to_content_value(&self) -> serde_json::Value {
+        match self {
+            UserMessageInput::Text(text) => serde_json::Value::String(text.clone()),
+            UserMessageInput::Blocks(blocks) => {
+                serde_json::to_value(blocks).unwrap_or_else(|_| serde_json::Value::Array(Vec::new()))
+            }
+        }
+    }
+}
+
+impl From<String> for UserMessageInput {
+    fn from(value: String) -> Self {
+        UserMessageInput::Text(value)
+    }
+}
+
+impl From<&str> for UserMessageInput {
+    fn from(value: &str) -> Self {
+        UserMessageInput::Text(value.to_string())
+    }
+}
+
+impl From<Vec<InputContentBlock>> for UserMessageInput {
+    fn from(blocks: Vec<InputContentBlock>) -> Self {
+        UserMessageInput::Blocks(blocks)
+    }
+}
+
+#[cfg(test)]
+mod input_content_tests {
+    use super::*;
+
+    #[test]
+    fn parses_base64_data_url() {
+        let src = ImageSource::from_data_url("data:image/png;base64,QUJD").unwrap();
+        assert_eq!(
+            src,
+            ImageSource::Base64 {
+                media_type: "image/png".to_string(),
+                data: "QUJD".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_non_base64_url() {
+        assert!(ImageSource::from_data_url("https://example.com/a.png").is_none());
+        assert!(ImageSource::from_data_url("data:image/png,QUJD").is_none());
+    }
+
+    #[test]
+    fn text_input_serializes_to_string_content() {
+        let input: UserMessageInput = "hello".into();
+        assert_eq!(input.to_content_value(), serde_json::json!("hello"));
+    }
+
+    #[test]
+    fn block_input_serializes_to_content_array() {
+        let input = UserMessageInput::Blocks(vec![
+            InputContentBlock::text("look:"),
+            InputContentBlock::image(ImageSource::Base64 {
+                media_type: "image/png".to_string(),
+                data: "QUJD".to_string(),
+            }),
+        ]);
+        assert_eq!(
+            input.to_content_value(),
+            serde_json::json!([
+                {"type": "text", "text": "look:"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "QUJD"}}
+            ])
+        );
+    }
+}

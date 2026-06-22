@@ -22,7 +22,7 @@ use crate::internal::transcript_mirror::TranscriptMirrorBatcher;
 use crate::internal::transport::{SubprocessCLITransport, Transport, TransportOptions};
 use crate::types::{
     ClaudeAgentOptions, ContentBlock, ContextUsageResponse, MCPStatusResponse, Message,
-    PermissionMode,
+    PermissionMode, UserMessageInput,
 };
 
 #[derive(Debug)]
@@ -65,10 +65,13 @@ impl ClaudeAgentClient {
     /// stream, so the caller only needs to hold the receiver. Connection or
     /// streaming failures are surfaced as a final [`StreamEvent::Error`].
     ///
+    /// Accepts any [`UserMessageInput`]: a plain `String`/`&str` for text-only
+    /// prompts, or a `Vec<InputContentBlock>` to deliver text plus images.
+    ///
     /// Must be called from within a Tokio runtime.
     pub fn spawn_stream_message(
         options: ClaudeAgentOptions,
-        content: impl Into<String>,
+        content: impl Into<UserMessageInput>,
     ) -> mpsc::UnboundedReceiver<StreamEvent> {
         let content = content.into();
         let (tx, rx) = mpsc::unbounded_channel();
@@ -82,7 +85,7 @@ impl ClaudeAgentClient {
 
     async fn run_spawned_stream(
         options: ClaudeAgentOptions,
-        content: String,
+        content: UserMessageInput,
         tx: mpsc::UnboundedSender<StreamEvent>,
     ) -> Result<()> {
         let mut client = Self::new(options)?;
@@ -199,7 +202,10 @@ impl ClaudeAgentClient {
         Ok(())
     }
 
-    pub async fn connect_with_prompt(&mut self, content: impl Into<String>) -> Result<()> {
+    pub async fn connect_with_prompt(
+        &mut self,
+        content: impl Into<UserMessageInput>,
+    ) -> Result<()> {
         self.connect().await?;
         let content = content.into();
         let payload = self.build_user_payload(&content, None)?;
@@ -263,7 +269,10 @@ impl ClaudeAgentClient {
         Ok(())
     }
 
-    pub async fn send_message(&mut self, content: impl Into<String>) -> Result<MessageResponse> {
+    pub async fn send_message(
+        &mut self,
+        content: impl Into<UserMessageInput>,
+    ) -> Result<MessageResponse> {
         self.query(content).await?;
         let messages = self.receive_response().await?;
         let mut content_parts: Vec<String> = Vec::new();
@@ -317,10 +326,10 @@ impl ClaudeAgentClient {
         })
     }
 
-    pub async fn query(&mut self, content: impl Into<String>) -> Result<()> {
+    pub async fn query(&mut self, content: impl Into<UserMessageInput>) -> Result<()> {
         self.require_connected()?;
-        let content_str = content.into();
-        let payload = self.build_user_payload(&content_str, None)?;
+        let content = content.into();
+        let payload = self.build_user_payload(&content, None)?;
         let mut json_payload = serde_json::to_vec(&payload)?;
         json_payload.push(b'\n');
         self.transport.write(&json_payload).await
@@ -328,13 +337,13 @@ impl ClaudeAgentClient {
 
     pub async fn query_with_session_id(
         &mut self,
-        content: impl Into<String>,
+        content: impl Into<UserMessageInput>,
         session_id: impl Into<String>,
     ) -> Result<()> {
         self.require_connected()?;
-        let content_str = content.into();
+        let content = content.into();
         let session_id = session_id.into();
-        let payload = self.build_user_payload(&content_str, Some(&session_id))?;
+        let payload = self.build_user_payload(&content, Some(&session_id))?;
         let mut json_payload = serde_json::to_vec(&payload)?;
         json_payload.push(b'\n');
         self.transport.write(&json_payload).await
@@ -418,11 +427,11 @@ impl ClaudeAgentClient {
 
     pub async fn stream_message(
         &mut self,
-        content: impl Into<String>,
+        content: impl Into<UserMessageInput>,
     ) -> Result<mpsc::UnboundedReceiver<StreamEvent>> {
         self.require_connected()?;
-        let content_str = content.into();
-        let payload = self.build_user_payload(&content_str, None)?;
+        let content = content.into();
+        let payload = self.build_user_payload(&content, None)?;
         let json_payload = serde_json::to_vec(&payload)?;
         self.transport.write(&json_payload).await?;
         self.transport
@@ -672,7 +681,7 @@ impl ClaudeAgentClient {
 
     fn build_user_payload(
         &self,
-        content: &str,
+        content: &UserMessageInput,
         session_id: Option<&str>,
     ) -> Result<serde_json::Map<String, serde_json::Value>> {
         let mut payload = serde_json::Map::new();
@@ -688,7 +697,9 @@ impl ClaudeAgentClient {
                     .unwrap_or_else(|| self.session_id.clone()),
             ),
         );
-        let message = serde_json::json!({"role": "user", "content": content});
+        // `content` is a JSON string for text-only prompts, or an array of
+        // content blocks (text + images) for multimodal prompts.
+        let message = serde_json::json!({"role": "user", "content": content.to_content_value()});
         payload.insert("message".to_string(), message);
         Ok(payload)
     }

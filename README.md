@@ -39,7 +39,7 @@ Add the crate from crates.io:
 
 ```toml
 [dependencies]
-claude-code-sdk-rust = "0.3"
+claude-code-sdk-rust = "0.4"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -53,7 +53,7 @@ Optional OpenTelemetry propagation support:
 
 ```toml
 [dependencies]
-claude-code-sdk-rust = { version = "0.3", features = ["otel"] }
+claude-code-sdk-rust = { version = "0.4", features = ["otel"] }
 ```
 
 Or track the development branch directly from Git:

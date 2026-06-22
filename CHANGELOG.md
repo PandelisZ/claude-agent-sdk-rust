@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (pre-1.0: breaking changes bump the minor version).
 
+## [0.4.0] - 2026-06-22
+
+### Added
+
+- Image (multimodal) prompt input. New public types in `types::messages`
+  (re-exported at the crate root):
+  - `UserMessageInput` — either `Text(String)` or `Blocks(Vec<InputContentBlock>)`.
+  - `InputContentBlock` — `Text { text }` or `Image { source }`.
+  - `ImageSource` — `Base64 { media_type, data }` or `Url { url }`, with
+    `ImageSource::from_data_url` to parse `data:<mime>;base64,<payload>` URLs.
+- A user message's `content` is now serialized as a JSON string for text-only
+  prompts, or as a content-block array (text + images) for multimodal prompts.
+
+### Changed
+
+- **Breaking:** the streaming/query entrypoints (`spawn_stream_message`,
+  `stream_message`, `query`, `query_with_session_id`, `connect_with_prompt`,
+  `send_message`) now accept `impl Into<UserMessageInput>` instead of
+  `impl Into<String>`. `String` and `&str` callers are unaffected; callers
+  passing other `Into<String>` types must convert to `String`/`UserMessageInput`.
+
 ## [0.3.1] - 2026-06-22
 
 ### Added
