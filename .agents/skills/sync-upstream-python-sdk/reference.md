@@ -4,6 +4,55 @@ Upstream repo: `https://github.com/anthropics/claude-agent-sdk-python`
 Python import: `claude_agent_sdk`  |  Rust import: `claude_agent_sdk`
 (crate published as `claude-code-sdk-rust`).
 
+## The public surface = the parity contract
+
+The authoritative list of what must exist in Rust is upstream
+`src/claude_agent_sdk/__init__.py`'s `__all__` (~125 symbols). `types.py`
+(~2100 lines) holds the field-level detail. `scripts/audit_parity.sh` extracts
+`__all__` and diffs it against the Rust crate; trust its **NEW** bucket as the
+port list and `parity_known.tsv` as the memory of everything already decided.
+
+What the symbol audit does **not** catch (check the `git log`/diff for these):
+- new fields on an existing type/message (same symbol, new shape),
+- changed serde tag/wire string values,
+- new CLI flags on `ClaudeAgentOptions` (mapped in `internal/cli_args.rs`),
+- behavior/bugfixes inside `_internal/`.
+
+## Rust naming/shape conventions (so audit hits are real)
+
+- Python `Mcp*` -> Rust `MCP*` (plus `Mcp*` aliases in `lib.rs`). Casing only.
+- Python message classes (`UserMessage`, `ResultMessage`, ...) -> variants of
+  the Rust `Message` enum (`Message::UserMsg`, `Message::ResultMsg`, ...).
+- Python content blocks (`TextBlock`, `ToolUseBlock`, `ServerToolUseBlock`, ...)
+  -> variants of the Rust `ContentBlock` enum.
+- Python `ThinkingConfig{Adaptive,Enabled,Disabled}` TypedDicts -> one Rust
+  `ThinkingConfig` struct discriminated by `ThinkingConfigType`.
+- Python `PermissionResultAllow/Deny` -> `PermissionResult` enum variants.
+- Per-event hook input/output TypedDicts -> currently one generic
+  `HookEventMessage` (see deferred rows in `parity_known.tsv`).
+- `__version__` -> `VERSION`; `CanUseTool` -> `CanUseToolCallback`;
+  `ToolAnnotations` -> `MCPToolAnnotations`; `SdkPluginConfig` -> `SDKPluginConfig`.
+
+These are encoded as `mapped` rows in `parity_known.tsv` so the audit treats
+them as covered. Add a row whenever you port a symbol to a non-matching name.
+
+## Worked example: porting a new message type (`task_updated`, v0.2.106)
+
+The reference port pattern, end to end:
+1. Status/const types in `src/types.rs` (`TaskUpdatedStatus` enum,
+   `TERMINAL_TASK_STATUSES`, `is_terminal_task_status`).
+2. Message struct in `src/types/messages.rs` + a `Message::TaskUpdatedMsg`
+   variant (use `#[serde(skip_serializing, skip_deserializing)]` for
+   parser-synthesized system messages; import the type at the top).
+3. Parser dispatch in `src/internal/parser.rs`: add a `Some("task_updated")`
+   arm in `parse_system_message_value` and a `parse_task_updated` that derives
+   fields from the raw payload exactly like the Python `message_parser.py`
+   (e.g. `status` comes from `patch.status`, parsed defensively to `None`).
+4. Tests in `tests/wire_parity.rs` (pin the JSON) + a presence assert in
+   `tests/root_exports.rs`.
+Cross-check the Rust parser against `_internal/message_parser.py` for the exact
+field-extraction semantics, not just the type shape.
+
 ## Python module -> Rust module map
 
 | Python (`src/claude_agent_sdk/`)        | Rust (`src/`)                          | Notes |

@@ -1,0 +1,53 @@
+# Known parity mappings for audit_parity.sh.
+# Columns (tab-separated):  symbol <TAB> status <TAB> note
+#   status = mapped    -> represented in Rust under a different name/shape; covered.
+#   status = deferred  -> intentionally not yet ported; a real gap to revisit.
+# Symbols that port 1:1 (same normalized name) do NOT need an entry here; the
+# script auto-matches them. Only list symbols whose Rust form differs, or gaps.
+# When you port a deferred item to a matching Rust name, delete its row.
+
+# --- mapped: different Rust name/shape, but covered ---
+McpServerConfig	mapped	enum MCPServerConfig (Mcp->MCP casing handled, but enum so listed)
+McpSdkServerConfig	mapped	MCPServerConfig::Sdk variant
+ToolAnnotations	mapped	MCPToolAnnotations / MCPToolAnnotations alias
+CanUseTool	mapped	CanUseToolCallback type
+SdkPluginConfig	mapped	SDKPluginConfig
+UserMessage	mapped	Message::UserMsg (enum variant)
+AssistantMessage	mapped	Message::AssistantMsg
+SystemMessage	mapped	Message::SystemMsg
+ResultMessage	mapped	Message::ResultMsg
+RateLimitEvent	mapped	Message::RateLimitEventMsg
+TextBlock	mapped	ContentBlock::Text
+ThinkingBlock	mapped	ContentBlock::Thinking
+ToolUseBlock	mapped	ContentBlock::ToolUse
+ToolResultBlock	mapped	ContentBlock::ToolResult
+ServerToolUseBlock	mapped	ContentBlock::ServerToolUse
+ServerToolResultBlock	mapped	ContentBlock::ServerToolResult (serde tag advisor_tool_result)
+ThinkingConfigAdaptive	mapped	ThinkingConfig{ type: ThinkingConfigType::Adaptive }
+ThinkingConfigEnabled	mapped	ThinkingConfig{ type: Enabled }
+ThinkingConfigDisabled	mapped	ThinkingConfig{ type: Disabled }
+PermissionResultAllow	mapped	PermissionResult::Allow
+PermissionResultDeny	mapped	PermissionResult::Deny
+HookInput	mapped	HookEventMessage (generic; see deferred per-event inputs)
+BaseHookInput	mapped	HookEventMessage (generic)
+HookContext	mapped	HookContext in types/hooks.rs
+HookCallback	mapped	HookCallback in types/hooks.rs
+HookJSONOutput	mapped	hook output handled as serde_json::Value in hooks.rs
+
+# --- deferred: genuine gaps, represented generically today ---
+EffortLevel	deferred	upstream Literal[low|medium|high|xhigh|max] + int; Rust effort: Option<String>/raw JSON. Add typed enum in types/agent_options.rs + cli_args.rs.
+ServerToolName	deferred	upstream Literal of 8 server-tool names; Rust ServerToolUse.name is String. Add enum in types/messages.rs.
+PreToolUseHookInput	deferred	per-event typed hook input; Rust uses generic HookEventMessage.
+PostToolUseHookInput	deferred	per-event typed hook input.
+PostToolUseFailureHookInput	deferred	per-event typed hook input.
+PostToolUseFailureHookSpecificOutput	deferred	per-event typed hook output.
+UserPromptSubmitHookInput	deferred	per-event typed hook input.
+StopHookInput	deferred	per-event typed hook input.
+SubagentStopHookInput	deferred	per-event typed hook input.
+PreCompactHookInput	deferred	per-event typed hook input.
+NotificationHookInput	deferred	per-event typed hook input.
+SubagentStartHookInput	deferred	per-event typed hook input.
+PermissionRequestHookInput	deferred	per-event typed hook input.
+NotificationHookSpecificOutput	deferred	per-event typed hook output.
+SubagentStartHookSpecificOutput	deferred	per-event typed hook output.
+PermissionRequestHookSpecificOutput	deferred	per-event typed hook output.
