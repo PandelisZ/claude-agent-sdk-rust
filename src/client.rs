@@ -425,6 +425,18 @@ impl ClaudeAgentClient {
         Ok(messages)
     }
 
+    /// Send a prompt and return a receiver pre-loaded with the turn's
+    /// [`StreamEvent`]s.
+    ///
+    /// NOTE: despite the name, this does **not** deliver events incrementally.
+    /// It drives the read loop to completion (until the terminal `result`
+    /// message) *before* returning, so the receiver is already fully populated
+    /// and `recv()` never awaits the network. Use it when you want the
+    /// per-event breakdown of a finished turn without threading a client.
+    ///
+    /// For genuine live, incremental delivery (events forwarded as the CLI
+    /// emits them), use [`Self::spawn_stream_message`], which owns the client
+    /// in a background task and streams into the receiver in real time.
     pub async fn stream_message(
         &mut self,
         content: impl Into<UserMessageInput>,

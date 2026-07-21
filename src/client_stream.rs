@@ -63,6 +63,9 @@ pub(crate) fn stream_events_from_message(
                             is_error: None,
                         });
                     }
+                    // Forward-compat: a content block type unknown at build
+                    // time emits no stream event but must not break the turn.
+                    ContentBlock::Unknown => {}
                 }
             }
             events.push(StreamEvent::Complete(MessageResponse {
