@@ -58,6 +58,11 @@ pub use query::{
     query_stream_messages_with_transport, QueryResult, TokenUsage,
 };
 
+// Re-export the transport seam so the public `*_with_transport` entry points
+// and `ClaudeAgentClient::with_transport` are usable without reaching into the
+// unstable `internal::` path.
+pub use internal::transport::Transport;
+
 // Re-export client types
 pub use client::ClaudeAgentClient;
 pub use client_types::{MessageResponse, StreamEvent};

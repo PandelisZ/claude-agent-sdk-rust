@@ -202,34 +202,9 @@ async fn run_query_messages_with_transport(
         .write(format!("{}\n", user_message).as_bytes())
         .await?;
 
-    let mut messages = Vec::new();
-
-    // Read messages until we get the result
-    while let Some(data) = transport.read().await? {
-        let line = String::from_utf8_lossy(&data);
-        let value = serde_json::from_slice::<serde_json::Value>(&data)?;
-        if value.get("type").and_then(|v| v.as_str()) == Some("control_request") {
-            respond_to_control_request(transport.as_mut(), &value, &control_callbacks).await?;
-            continue;
-        }
-        if value.get("type").and_then(|v| v.as_str()) == Some("transcript_mirror") {
-            if let Some(batcher) = &mut transcript_mirror {
-                messages.extend(batcher.enqueue_value(&value).await?);
-            }
-            continue;
-        }
-        match parse_message_line(&line)? {
-            Some(message @ Message::ResultMsg { .. }) => {
-                flush_transcript_mirror(&mut transcript_mirror).await?;
-                messages.push(message);
-                break;
-            }
-            Some(message) => {
-                messages.push(message);
-            }
-            None => {}
-        }
-    }
+    let messages =
+        collect_until_result(transport.as_mut(), &control_callbacks, &mut transcript_mirror)
+            .await?;
 
     // Close the transport
     flush_transcript_mirror(&mut transcript_mirror).await?;
@@ -270,36 +245,60 @@ where
     }
     transport.close_input().await?;
 
+    let messages =
+        collect_until_result(transport.as_mut(), &control_callbacks, &mut transcript_mirror)
+            .await?;
+
+    flush_transcript_mirror(&mut transcript_mirror).await?;
+    transport.close().await?;
+
+    Ok(messages)
+}
+
+/// Read CLI stdout lines until the terminal `result` message, dispatching
+/// control requests and transcript-mirror frames along the way.
+///
+/// A single unparseable line is logged and skipped rather than aborting the
+/// whole turn: one unrecognized message shape must never discard an entire
+/// response. Shared by both the string-prompt and streamed-prompt query paths.
+async fn collect_until_result(
+    transport: &mut dyn Transport,
+    control_callbacks: &ControlCallbacks,
+    transcript_mirror: &mut Option<TranscriptMirrorBatcher>,
+) -> Result<Vec<Message>> {
     let mut messages = Vec::new();
     while let Some(data) = transport.read().await? {
         let line = String::from_utf8_lossy(&data);
         let value = serde_json::from_slice::<serde_json::Value>(&data)?;
         if value.get("type").and_then(|v| v.as_str()) == Some("control_request") {
-            respond_to_control_request(transport.as_mut(), &value, &control_callbacks).await?;
+            respond_to_control_request(transport, &value, control_callbacks).await?;
             continue;
         }
         if value.get("type").and_then(|v| v.as_str()) == Some("transcript_mirror") {
-            if let Some(batcher) = &mut transcript_mirror {
+            if let Some(batcher) = transcript_mirror {
                 messages.extend(batcher.enqueue_value(&value).await?);
             }
             continue;
         }
-        match parse_message_line(&line)? {
+        let parsed = match parse_message_line(&line) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                // Non-fatal: mirror the interactive client's resilience so a
+                // single bad line can't sink the whole query.
+                tracing::warn!("skipping unparseable CLI message: {err}");
+                continue;
+            }
+        };
+        match parsed {
             Some(message @ Message::ResultMsg { .. }) => {
-                flush_transcript_mirror(&mut transcript_mirror).await?;
+                flush_transcript_mirror(transcript_mirror).await?;
                 messages.push(message);
                 break;
             }
-            Some(message) => {
-                messages.push(message);
-            }
+            Some(message) => messages.push(message),
             None => {}
         }
     }
-
-    flush_transcript_mirror(&mut transcript_mirror).await?;
-    transport.close().await?;
-
     Ok(messages)
 }
 

@@ -63,6 +63,9 @@ pub(crate) fn stream_events_from_message(
                             is_error: None,
                         });
                     }
+                    // Forward-compat: a content block type unknown at build
+                    // time emits no stream event but must not break the turn.
+                    ContentBlock::Unknown => {}
                 }
             }
             events.push(StreamEvent::Complete(MessageResponse {
@@ -132,6 +135,35 @@ pub(crate) fn stream_events_from_message(
                 .or_else(|| model_usage.clone())
                 .map(|usage| usage.into_iter().collect()),
         })],
+        Message::UserMsg { content, .. } => {
+            // Tool results arrive as a `user`-type message whose content array
+            // carries `tool_result` blocks (the CLI emits
+            // assistant[tool_use] -> user[tool_result] -> assistant[text]).
+            // The Python Agent SDK surfaces these as ToolResultBlock; without
+            // this arm they fall through to `_` and are silently dropped, so
+            // callers streaming a turn never see tool output.
+            //
+            // `content.content` is a raw JSON value: an array of blocks in the
+            // structured case, or a bare string for some built-in tool error
+            // text (which carries no `tool_use_id` and is surfaced through the
+            // following assistant message instead).
+            let mut events = Vec::new();
+            if let Some(blocks) = content.content.as_array() {
+                for block in blocks {
+                    if block.get("type").and_then(|v| v.as_str()) != Some("tool_result") {
+                        continue;
+                    }
+                    if let Some(id) = block.get("tool_use_id").and_then(|v| v.as_str()) {
+                        events.push(StreamEvent::ToolResult {
+                            tool_use_id: id.to_string(),
+                            content: block.get("content").cloned(),
+                            is_error: block.get("is_error").and_then(|v| v.as_bool()),
+                        });
+                    }
+                }
+            }
+            events
+        }
         _ => Vec::new(),
     }
 }
@@ -255,5 +287,48 @@ mod tests {
         let usage = complete.usage.as_ref().expect("usage should be present");
         assert_eq!(usage.get("input_tokens").and_then(|v| v.as_i64()), Some(11));
         assert_eq!(usage.get("output_tokens").and_then(|v| v.as_i64()), Some(7));
+    }
+
+    #[test]
+    fn user_message_tool_result_becomes_stream_event() {
+        // Regression: tool results arrive as a `user` message; they must be
+        // surfaced as ToolResult stream events, not dropped.
+        let raw = serde_json::json!({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_123",
+                     "content": "done", "is_error": false}
+                ]
+            }
+        });
+        let message: Message = serde_json::from_value(raw).expect("valid user message");
+        let events = stream_events_from_message(&message, "sess");
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            StreamEvent::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                assert_eq!(tool_use_id, "toolu_123");
+                assert_eq!(content.as_ref().unwrap(), &serde_json::json!("done"));
+                assert_eq!(*is_error, Some(false));
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn user_message_string_content_yields_no_events() {
+        // Some built-in tool errors arrive as a bare string with no
+        // tool_use_id; that must not panic or fabricate a ToolResult.
+        let raw = serde_json::json!({
+            "type": "user",
+            "message": {"role": "user", "content": "plain built-in tool error text"}
+        });
+        let message: Message = serde_json::from_value(raw).expect("valid user message");
+        assert!(stream_events_from_message(&message, "sess").is_empty());
     }
 }

@@ -98,6 +98,15 @@ pub enum ContentBlock {
         tool_use_id: String,
         content: serde_json::Value,
     },
+    /// A content block whose `type` was not known at build time.
+    ///
+    /// Forward-compatibility fallback, mirroring [`ServerToolName::Other`]: a
+    /// content block introduced by a newer `claude` CLI deserializes into this
+    /// variant instead of failing the *entire* assistant message. All known
+    /// blocks around it (text, tool use, …) are preserved. This is the property
+    /// that keeps `query()`/`query_messages()` resilient to CLI protocol growth.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -492,5 +501,51 @@ mod input_content_tests {
                 {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "QUJD"}}
             ])
         );
+    }
+}
+
+#[cfg(test)]
+mod forward_compat_tests {
+    use super::*;
+
+    #[test]
+    fn unknown_content_block_does_not_fail_parse() {
+        // A content block type introduced by a future CLI must parse into
+        // `Unknown` while the known blocks around it survive intact.
+        let json = serde_json::json!([
+            {"type": "text", "text": "hello"},
+            {"type": "some_future_block", "payload": {"x": 1}}
+        ]);
+        let blocks: Vec<ContentBlock> =
+            serde_json::from_value(json).expect("unknown block must not fail parsing");
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(&blocks[0], ContentBlock::Text { text } if text == "hello"));
+        assert!(matches!(&blocks[1], ContentBlock::Unknown));
+    }
+
+    #[test]
+    fn assistant_message_with_unknown_block_parses() {
+        // Regression guard: an assistant message carrying an unknown block must
+        // still deserialize (previously this aborted the whole message).
+        let json = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "text", "text": "hi"},
+                    {"type": "brand_new_block", "data": 42}
+                ],
+                "model": "claude-x"
+            }
+        });
+        let msg: Message =
+            serde_json::from_value(json).expect("assistant with unknown block must parse");
+        match msg {
+            Message::AssistantMsg { content, .. } => {
+                assert_eq!(content.content.len(), 2);
+                assert!(matches!(content.content[0], ContentBlock::Text { .. }));
+                assert!(matches!(content.content[1], ContentBlock::Unknown));
+            }
+            other => panic!("expected AssistantMsg, got {other:?}"),
+        }
     }
 }
