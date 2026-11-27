@@ -118,3 +118,43 @@ fn session_helpers_are_exported_at_crate_root() {
     assert!(!claude_code_sdk_rust::is_terminal_task_status("running"));
     assert!(claude_code_sdk_rust::TERMINAL_TASK_STATUSES.contains(&"killed"));
 }
+
+#[test]
+fn hook_and_permission_types_are_exported_at_crate_root() {
+    use claude_code_sdk_rust as sdk;
+    let _ = std::any::type_name::<sdk::HookEffort>();
+    let _ = std::any::type_name::<sdk::BackgroundTaskSummary>();
+    let _ = std::any::type_name::<sdk::SessionCronSummary>();
+    let _ = std::any::type_name::<sdk::HookEvent>();
+    let _ = std::any::type_name::<sdk::HookOnFailure>();
+    let _ = std::any::type_name::<sdk::HookSpecificOutput>();
+    let _ = std::any::type_name::<sdk::PreToolUseHookSpecificOutput>();
+    let _ = std::any::type_name::<sdk::PostToolUseHookSpecificOutput>();
+    let _ = std::any::type_name::<sdk::PostToolUseFailureHookSpecificOutput>();
+    let _ = std::any::type_name::<sdk::UserPromptSubmitHookSpecificOutput>();
+    let _ = std::any::type_name::<sdk::UserPromptExpansionHookSpecificOutput>();
+    let _ = std::any::type_name::<sdk::SessionStartHookSpecificOutput>();
+    let _ = std::any::type_name::<sdk::NotificationHookSpecificOutput>();
+    let _ = std::any::type_name::<sdk::SubagentStartHookSpecificOutput>();
+    let _ = std::any::type_name::<sdk::PermissionRequestHookSpecificOutput>();
+    let _ = std::any::type_name::<sdk::PostToolBatchHookSpecificOutput>();
+    let _ = std::any::type_name::<sdk::StopHookSpecificOutput>();
+    let _ = std::any::type_name::<sdk::SubagentStopHookSpecificOutput>();
+    let _ = std::any::type_name::<sdk::PermissionDeniedHookSpecificOutput>();
+    let _ = std::any::type_name::<sdk::PreModelSwitchHookSpecificOutput>();
+    let _ = std::any::type_name::<sdk::PostModelSwitchHookSpecificOutput>();
+    let _ = std::any::type_name::<sdk::ElicitationHookSpecificOutput>();
+    let _ = std::any::type_name::<sdk::ElicitationResultHookSpecificOutput>();
+    let _ = std::any::type_name::<sdk::CwdChangedHookSpecificOutput>();
+    let _ = std::any::type_name::<sdk::FileChangedHookSpecificOutput>();
+    let _ = std::any::type_name::<sdk::WorktreeCreateHookSpecificOutput>();
+    let _ = std::any::type_name::<sdk::MessageDisplayHookSpecificOutput>();
+    let _ = std::any::type_name::<sdk::HookJSONOutput>();
+    let _ = std::any::type_name::<sdk::SyncHookJSONOutput>();
+    let _ = std::any::type_name::<sdk::AsyncHookJSONOutput>();
+    let _ = std::any::type_name::<sdk::PermissionBehavior>();
+    let _ = std::any::type_name::<sdk::PermissionUpdateDestination>();
+    let _ = std::any::type_name::<sdk::PermissionUpdateType>();
+    let _ = std::any::type_name::<sdk::CanUseToolShadowedWarning>();
+    let _ = sdk::can_use_tool_shadowed_warning;
+}
