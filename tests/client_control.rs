@@ -673,6 +673,57 @@ async fn malformed_known_message_is_yielded_as_error_and_the_stream_goes_on() {
 }
 
 #[tokio::test]
+async fn a_kept_but_idle_receive_stream_does_not_block_later_receives() {
+    let transport = MockTransport::new();
+    transport.push(assistant("one"));
+    transport.push(result_frame());
+    transport.push(assistant("two"));
+    transport.push(result_frame());
+    let mut client = make_client(ClaudeAgentOptions::default(), &transport);
+    client.connect().await.unwrap();
+
+    // Read one message, then stop polling while keeping the stream alive
+    // (e.g. after breaking out of a loop over it).
+    let mut all = client.receive_messages();
+    let first = all.next().await.unwrap().unwrap();
+    assert!(matches!(first, Message::AssistantMsg { .. }));
+
+    let rest = tokio::time::timeout(Duration::from_secs(5), client.collect_response())
+        .await
+        .expect("an idle stream must not hold the message queue")
+        .unwrap();
+    assert_eq!(rest.len(), 1);
+    assert!(matches!(rest[0], Message::ResultMsg { .. }));
+    let next = tokio::time::timeout(Duration::from_secs(5), client.collect_response())
+        .await
+        .expect("second turn")
+        .unwrap();
+    assert_eq!(next.len(), 2);
+    drop(all);
+    client.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn receive_response_ends_after_a_malformed_result() {
+    let transport = MockTransport::new();
+    transport.push(serde_json::json!({"type": "result", "subtype": "success"}));
+    transport.push(assistant("next turn"));
+    let mut client = make_client(ClaudeAgentOptions::default(), &transport);
+    client.connect().await.unwrap();
+    let items: Vec<_> = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.receive_response().collect::<Vec<_>>(),
+    )
+    .await
+    .expect("the response stream ends at the malformed result");
+    assert_eq!(items.len(), 1);
+    assert!(matches!(&items[0], Err(ClaudeSDKError::MessageParse(_))));
+    let next = client.receive_messages().next().await.unwrap().unwrap();
+    assert!(matches!(next, Message::AssistantMsg { .. }));
+    client.disconnect().await.unwrap();
+}
+
+#[tokio::test]
 async fn process_error_after_error_result_becomes_result_error() {
     let transport = MockTransport::new();
     transport.push(error_result_frame());

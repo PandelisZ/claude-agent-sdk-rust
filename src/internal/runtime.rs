@@ -116,8 +116,12 @@ impl RuntimeConfig {
 #[allow(clippy::large_enum_variant)] // moved through a channel, never copied
 enum StreamItem {
     Message(Message),
-    /// A known message type that failed to parse; the stream goes on.
-    ParseError(ClaudeSDKError),
+    /// A known message type that failed to parse; the stream goes on
+    /// (a response stream ends after a malformed `result`).
+    ParseError {
+        error: ClaudeSDKError,
+        is_result: bool,
+    },
     /// The reader failed; nothing follows.
     Fatal(ClaudeSDKError),
 }
@@ -682,7 +686,15 @@ impl Runtime {
     /// Stream the parsed messages as they arrive. With `stop_at_result` the
     /// stream ends after (and including) the next `ResultMessage`.
     pub(crate) fn messages(&self, stop_at_result: bool) -> MessageStream {
-        message_stream(Arc::clone(&self.inner().messages), stop_at_result)
+        message_stream(Arc::clone(&self.inner().messages), stop_at_result, false)
+    }
+
+    /// Like [`Runtime::messages`], but the stream keeps the queue to itself
+    /// from its first poll until it ends, so a turn is not split with
+    /// another consumer. Only for streams that are polled to the end (a
+    /// background forwarder), never for streams handed to the caller.
+    pub(crate) fn exclusive_messages(&self, stop_at_result: bool) -> MessageStream {
+        message_stream(Arc::clone(&self.inner().messages), stop_at_result, true)
     }
 
     /// Run `stream_input` for `stream` as a background task, aborted when
@@ -719,10 +731,22 @@ impl Runtime {
     /// Close the session (Python `Query.close`): stop the router (final
     /// transcript-mirror flush), cancel in-flight handlers and background
     /// tasks, then close the transport. Returns the transport.
+    ///
+    /// The close runs in its own task (Python shields `Query.close`): a
+    /// caller that stops waiting, for example under a timeout, must not
+    /// leave the handlers, the ceiling and the CLI process half torn down.
     pub(crate) async fn close(mut self) -> (Result<()>, Option<Box<dyn Transport>>) {
-        match self.inner.take() {
-            Some(inner) => inner.close().await,
-            None => (Ok(()), None),
+        let Some(inner) = self.inner.take() else {
+            return (Ok(()), None);
+        };
+        match tokio::spawn(inner.close()).await {
+            Ok(closed) => closed,
+            Err(error) => (
+                Err(ClaudeSDKError::Other(format!(
+                    "closing the session failed: {error}"
+                ))),
+                None,
+            ),
         }
     }
 }
@@ -775,33 +799,45 @@ pub(crate) struct InitCall {
     blocks_on_failure: bool,
 }
 
+/// Unless `exclusive`, the receiver is locked only while an item is
+/// awaited, never between items: a stream that is kept alive but no longer
+/// polled (say, a `receive_response()` loop the caller broke out of to
+/// interrupt) must not block a later receive. Streams polled concurrently
+/// share the queue, as upstream's iterators share one memory stream.
 fn message_stream(
     messages: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<StreamItem>>>,
     stop_at_result: bool,
+    exclusive: bool,
 ) -> MessageStream {
+    type Receiver = mpsc::UnboundedReceiver<StreamItem>;
     enum State {
-        Idle(Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<StreamItem>>>),
-        Active(tokio::sync::OwnedMutexGuard<mpsc::UnboundedReceiver<StreamItem>>),
-        Done,
+        Shared(Arc<tokio::sync::Mutex<Receiver>>),
+        Held(tokio::sync::OwnedMutexGuard<Receiver>),
     }
-    futures::stream::unfold(State::Idle(messages), move |state| async move {
-        let mut receiver = match state {
-            State::Idle(messages) => messages.lock_owned().await,
-            State::Active(receiver) => receiver,
-            State::Done => return None,
+    futures::stream::unfold(Some(State::Shared(messages)), move |state| async move {
+        let item = match state? {
+            State::Shared(messages) if !exclusive => {
+                let item = messages.lock().await.recv().await?;
+                (item, State::Shared(messages))
+            }
+            State::Shared(messages) => {
+                let mut receiver = messages.lock_owned().await;
+                (receiver.recv().await?, State::Held(receiver))
+            }
+            State::Held(mut receiver) => (receiver.recv().await?, State::Held(receiver)),
         };
-        match receiver.recv().await? {
+        let (item, next) = item;
+        match item {
             StreamItem::Message(message) => {
                 let done = stop_at_result && matches!(message, Message::ResultMsg { .. });
-                let next = if done {
-                    State::Done
-                } else {
-                    State::Active(receiver)
-                };
-                Some((Ok(message), next))
+                Some((Ok(message), (!done).then_some(next)))
             }
-            StreamItem::ParseError(error) => Some((Err(error), State::Active(receiver))),
-            StreamItem::Fatal(error) => Some((Err(error), State::Done)),
+            StreamItem::ParseError { error, is_result } => {
+                // A malformed result still ends the turn.
+                let done = stop_at_result && is_result;
+                Some((Err(error), (!done).then_some(next)))
+            }
+            StreamItem::Fatal(error) => Some((Err(error), None)),
         }
     })
     .boxed()
@@ -1018,10 +1054,11 @@ async fn route_frame(
     }
     state.tracker.observe(&value);
 
+    let is_result = msg_type.as_deref() == Some("result");
     let item = match parse_message_value(value) {
         Ok(Some(message)) => StreamItem::Message(message),
         Ok(None) => return,
-        Err(error) => StreamItem::ParseError(error),
+        Err(error) => StreamItem::ParseError { error, is_result },
     };
     let _ = messages.send(item);
 }

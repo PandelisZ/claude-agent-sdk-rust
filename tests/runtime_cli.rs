@@ -185,3 +185,35 @@ drain_stdin
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Known gap: the background I/O task cannot read while a write is in
+/// flight (`Transport` takes `&mut self` for both). A CLI that writes more
+/// than a pipe buffer to stdout while the SDK is blocked writing a large
+/// prompt to its stdin then deadlocks; upstream reads and writes from
+/// separate tasks. Fixing it needs the subprocess transport to drain stdout
+/// in its own task.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "known gap: stdout is not drained while a large stdin write blocks"]
+async fn large_prompt_write_while_the_cli_floods_stdout_does_not_deadlock() {
+    let line = "x".repeat(1000);
+    let (dir, script) = fake_cli(&format!(
+        r#"answer_init
+sleep 1
+i=0
+while [ $i -lt 400 ]; do assistant "{line}"; i=$((i+1)); done
+read -r prompt
+result
+drain_stdin
+"#
+    ));
+    let mut client = ClaudeAgentClient::new(options_for(&script).build()).unwrap();
+    client.connect().await.unwrap();
+    let outcome = tokio::time::timeout(Duration::from_secs(20), async {
+        client.query("y".repeat(1_000_000)).await.unwrap();
+        client.collect_response().await.unwrap()
+    })
+    .await;
+    drop(client);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(outcome.expect("no pipe deadlock").len(), 401);
+}

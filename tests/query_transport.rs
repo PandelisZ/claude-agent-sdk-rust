@@ -348,6 +348,49 @@ async fn initialize_failure_closes_the_transport() {
     assert!(transport.lock().closed);
 }
 
+/// A live transport whose prompt writes fail (control frames still work).
+struct FailingPromptWrites(MockTransport);
+
+#[async_trait::async_trait]
+impl claude_code_sdk_rust::Transport for FailingPromptWrites {
+    async fn connect(&mut self) -> claude_code_sdk_rust::Result<()> {
+        self.0.connect().await
+    }
+    async fn write(&mut self, data: &[u8]) -> claude_code_sdk_rust::Result<()> {
+        if data.starts_with(br#"{"type":"user""#) {
+            return Err(claude_code_sdk_rust::CLIConnectionError::new("stdin broke").into());
+        }
+        self.0.write(data).await
+    }
+    async fn close_input(&mut self) -> claude_code_sdk_rust::Result<()> {
+        self.0.close_input().await
+    }
+    async fn read(&mut self) -> claude_code_sdk_rust::Result<Option<Vec<u8>>> {
+        self.0.read().await
+    }
+    async fn close(&mut self) -> claude_code_sdk_rust::Result<()> {
+        self.0.close().await
+    }
+}
+
+#[tokio::test]
+async fn failed_prompt_write_fails_a_bidirectional_query_instead_of_hanging() {
+    let transport = MockTransport::new();
+    let err = tokio::time::timeout(
+        Duration::from_secs(5),
+        query_messages_with_transport(
+            "hi",
+            Some(hook_options()),
+            Box::new(FailingPromptWrites(transport.clone())),
+        ),
+    )
+    .await
+    .expect("a failed prompt write must not wait for a run that cannot start")
+    .unwrap_err();
+    assert_eq!(err.to_string(), "stdin broke");
+    assert!(transport.lock().closed);
+}
+
 #[tokio::test]
 async fn connect_failure_is_returned() {
     let transport = MockTransport::new();

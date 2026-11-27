@@ -351,13 +351,13 @@ impl ClaudeAgentClient {
     /// CLI failing, or a [`crate::ResultError`] after an error result) is the
     /// last item. The stream does not borrow the client.
     pub fn receive_messages(&self) -> MessageStream {
-        self.message_stream(false)
+        self.message_stream(false, false)
     }
 
     /// Stream messages up to and including the next `ResultMessage` (Python
     /// `receive_response()`).
     pub fn receive_response(&self) -> MessageStream {
-        self.message_stream(true)
+        self.message_stream(true, false)
     }
 
     /// Collect [`Self::receive_response`] into a `Vec`, failing on the first
@@ -372,14 +372,18 @@ impl ClaudeAgentClient {
         self.receive_messages().try_collect().await
     }
 
-    fn message_stream(&self, stop_at_result: bool) -> MessageStream {
+    fn message_stream(&self, stop_at_result: bool, exclusive: bool) -> MessageStream {
         let runtime = match self.runtime() {
             Ok(runtime) => runtime,
             Err(error) => return futures::stream::once(async move { Err(error) }).boxed(),
         };
         let history = Arc::clone(&self.history);
-        runtime
-            .messages(stop_at_result)
+        let messages = if exclusive {
+            runtime.exclusive_messages(stop_at_result)
+        } else {
+            runtime.messages(stop_at_result)
+        };
+        messages
             .inspect(move |item| {
                 if let Ok(message) = item {
                     history
@@ -402,7 +406,9 @@ impl ClaudeAgentClient {
     ) -> Result<mpsc::UnboundedReceiver<StreamEvent>> {
         self.query(content).await?;
         let (tx, rx) = mpsc::unbounded_channel();
-        let messages = self.receive_response();
+        // The forwarder owns the queue for the whole turn, so back-to-back
+        // stream_message calls each get their own turn, in order.
+        let messages = self.message_stream(true, true);
         let session_id = self.session_id.clone();
         tokio::spawn(async move { forward_events(messages, session_id, &tx).await });
         Ok(rx)

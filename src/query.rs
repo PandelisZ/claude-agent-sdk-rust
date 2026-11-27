@@ -207,7 +207,10 @@ where
     collect_query(
         options.unwrap_or_default(),
         None,
-        move |shared| async move { shared.stream_input(stream).await },
+        move |shared| async move {
+            shared.stream_input(stream).await;
+            Ok(())
+        },
     )
     .await
 }
@@ -224,7 +227,10 @@ where
     collect_query(
         options.unwrap_or_default(),
         Some(transport),
-        move |shared| async move { shared.stream_input(stream).await },
+        move |shared| async move {
+            shared.stream_input(stream).await;
+            Ok(())
+        },
     )
     .await
 }
@@ -353,14 +359,17 @@ fn text_prompt(prompt: String) -> serde_json::Value {
     })
 }
 
-/// Write the string prompt, then close stdin once the run ends.
-async fn send_text_prompt(shared: Arc<Shared>, prompt: String) {
-    if let Err(error) = shared.write_json(&shared.stamp(text_prompt(prompt))).await {
-        tracing::error!("Failed to write the prompt; closing stdin: {error}");
-    }
+/// Write the string prompt, then close stdin once the run ends. A failed
+/// prompt write fails the query (Python lets the write error propagate):
+/// no result can follow, so waiting for the run to end would hang.
+async fn send_text_prompt(shared: Arc<Shared>, prompt: String) -> Result<()> {
+    shared
+        .write_json(&shared.stamp(text_prompt(prompt)))
+        .await?;
     if let Err(error) = shared.wait_for_result_and_end_input().await {
         tracing::debug!("Error closing input stream: {error}");
     }
+    Ok(())
 }
 
 /// Run a query to completion, driving `send_prompt` alongside the reader.
@@ -371,7 +380,7 @@ async fn collect_query<F, Fut>(
 ) -> Result<Vec<Message>>
 where
     F: FnOnce(Arc<Shared>) -> Fut,
-    Fut: Future<Output = ()>,
+    Fut: Future<Output = Result<()>>,
 {
     let mut session = QuerySession::open(options, transport).await?;
     let result = {
@@ -383,7 +392,12 @@ where
         loop {
             tokio::select! {
                 biased;
-                _ = &mut input, if !input_done => input_done = true,
+                sent = &mut input, if !input_done => {
+                    input_done = true;
+                    if let Err(error) = sent {
+                        break Err(error);
+                    }
+                }
                 item = messages.next() => match item {
                     Some(Ok(message)) => collected.push(message),
                     Some(Err(error)) => break Err(error),
