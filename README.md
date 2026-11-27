@@ -6,68 +6,47 @@
 
 An async Rust SDK for the Claude Code CLI.
 
-> **Crate name vs. import path:** this crate is published on crates.io as
-> **`claude-code-sdk-rust`**, but its library import path is **`claude_agent_sdk`**.
-> Add `claude-code-sdk-rust` to your `Cargo.toml` and write
-> `use claude_agent_sdk::...;` in your code.
+It drives an authenticated local `claude` CLI process with typed options,
+streamed message parsing, interactive sessions, control requests, hooks,
+permission callbacks, in-process SDK MCP servers, and local/session-store
+helpers. The API is modeled on the Python
+[`claude-agent-sdk`](https://github.com/anthropics/claude-agent-sdk-python),
+using Rust-native async streams, traits and typed data structures.
 
-This crate provides a Tokio-native SDK for driving an authenticated local `claude` CLI process with typed options, message parsing, interactive sessions, control requests, SDK MCP servers, and local/session-store helpers. It is modeled after the Python `claude-agent-sdk` API while using Rust-native async, traits, and type-safe data structures.
+**Parity target:** Python `claude-agent-sdk` **v0.2.189**.
 
-## Status
-
-This repository is an SDK implementation, not an official Anthropic package. It targets parity with the Python Claude Agent SDK public behavior and is verified by the local test suite.
-
-Verification:
-
-```bash
-cargo test
-cargo check --features otel
-```
-
-The normal test suite avoids paid/authenticated CLI calls. The ignored `e2e_cli` smoke test can be run separately when the Claude CLI is authenticated.
+> This is a community SDK, not an official Anthropic package. The crate is
+> published as `claude-code-sdk-rust` and imported as `claude_code_sdk_rust`.
 
 ## Requirements
 
-- Rust 1.70+
-- Tokio runtime
-- Claude Code CLI installed and authenticated
-- `claude` available on `PATH`, or set via `ClaudeAgentOptions::builder().cli_path(...)`
+- Rust (edition 2021) and a Tokio runtime
+- Claude Code CLI installed and authenticated, on `PATH` or set with
+  `ClaudeAgentOptions::builder().cli_path(...)`
 
 ## Installation
 
-Add the crate from crates.io:
-
 ```toml
 [dependencies]
-claude-code-sdk-rust = "0.4"
+claude-code-sdk-rust = "0.5"
 tokio = { version = "1", features = ["full"] }
+futures = "0.3"
 ```
 
-Then import it through its library path, `claude_agent_sdk`:
-
-```rust
-use claude_agent_sdk::query;
-```
-
-Optional OpenTelemetry propagation support:
+Enable OpenTelemetry trace-context propagation with the `otel` feature:
 
 ```toml
 [dependencies]
-claude-code-sdk-rust = { version = "0.4", features = ["otel"] }
-```
-
-Or track the development branch directly from Git:
-
-```toml
-[dependencies]
-claude-code-sdk-rust = { git = "https://github.com/PandelisZ/claude-agent-sdk-rust" }
+claude-code-sdk-rust = { version = "0.5", features = ["otel"] }
 ```
 
 ## Quick start
 
 ### One-shot query
 
-```rust
+`query` runs a prompt to completion and returns the summarized text.
+
+```rust,no_run
 use claude_code_sdk_rust::query;
 
 #[tokio::main]
@@ -78,98 +57,133 @@ async fn main() -> claude_code_sdk_rust::Result<()> {
 }
 ```
 
-### Full message sequence
+### Streaming one-shot query
 
-```rust
-use claude_code_sdk_rust::query_messages;
+`stream_query` is the Python `query()` async iterator: it yields each
+`Message` as it arrives. The prompt is a string or a `QueryPrompt::messages`
+stream of raw stream-json frames.
+
+```rust,no_run
+use claude_code_sdk_rust::{stream_query, ContentBlock, Message, QueryPrompt};
+use futures::StreamExt;
 
 #[tokio::main]
 async fn main() -> claude_code_sdk_rust::Result<()> {
-    let messages = query_messages("List the files you would inspect first.", None).await?;
-
-    for message in messages {
-        println!("{message:?}");
+    let mut messages = stream_query("List the files you would inspect first.", None);
+    while let Some(message) = messages.next().await {
+        match message? {
+            Message::AssistantMsg { content, .. } => {
+                for block in content.content {
+                    if let ContentBlock::Text { text } = block {
+                        println!("{text}");
+                    }
+                }
+            }
+            Message::ResultMsg { total_cost_usd, .. } => println!("cost: {total_cost_usd:?}"),
+            _ => {}
+        }
     }
 
+    // Streamed input: each value is written to the CLI as one JSON line.
+    let frames = futures::stream::iter(vec![serde_json::json!({
+        "type": "user",
+        "message": {"role": "user", "content": "Hello"}
+    })]);
+    let mut messages = stream_query(QueryPrompt::messages(frames), None);
+    while let Some(message) = messages.next().await {
+        println!("{:?}", message?);
+    }
     Ok(())
 }
 ```
 
-### Streamed one-shot input
-
-```rust
-use claude_code_sdk_rust::query_stream_messages;
-
-#[tokio::main]
-async fn main() -> claude_code_sdk_rust::Result<()> {
-    let stream = futures::stream::iter(vec![
-        serde_json::json!({
-            "type": "user",
-            "message": {"role": "user", "content": "First prompt frame"}
-        }),
-        serde_json::json!({
-            "type": "user",
-            "message": {"role": "user", "content": "Second prompt frame"}
-        }),
-    ]);
-
-    let messages = query_stream_messages(stream, None).await?;
-    println!("received {} messages", messages.len());
-    Ok(())
-}
-```
+`query_messages` / `query_stream_messages` collect the same stream into a
+`Vec<Message>`, and the `*_with_transport` variants accept any
+`Box<dyn Transport>`.
 
 ## Interactive client
 
-The interactive client mirrors the Python SDK's explicit connection model: create the client, call `connect()`, send prompts or control requests, receive messages, then `disconnect()` or `close()`.
+`ClaudeAgentClient` (alias `ClaudeSDKClient`) mirrors the Python client:
+`connect()`, send prompts and control requests, read messages, then
+`disconnect()`. `receive_response()` and `receive_messages()` return a
+`MessageStream` (a `BoxStream` of `Result<Message>`) that does not borrow the
+client; `collect_response()` / `collect_messages()` gather them into a `Vec`.
 
-```rust
-use claude_code_sdk_rust::{ClaudeAgentClient, ClaudeAgentOptions, PermissionMode};
+```rust,no_run
+use claude_code_sdk_rust::{ClaudeAgentClient, ClaudeAgentOptions, Message, PermissionMode};
+use futures::StreamExt;
 
 #[tokio::main]
 async fn main() -> claude_code_sdk_rust::Result<()> {
     let options = ClaudeAgentOptions::builder()
-        .model("claude-sonnet-4-20250514")
         .permission_mode(PermissionMode::AcceptEdits)
         .build();
 
     let mut client = ClaudeAgentClient::new(options)?;
     client.connect().await?;
 
-    client.query("Inspect this repository and summarize the test strategy.").await?;
-    let messages = client.receive_response().await?;
-
-    for message in messages {
-        println!("{message:?}");
+    client.query("Summarize this repository's test strategy.").await?;
+    let mut stream = client.receive_response();
+    while let Some(message) = stream.next().await {
+        if let Message::ResultMsg { result, .. } = message? {
+            println!("{result:?}");
+        }
     }
+
+    // Or collect a whole turn at once.
+    client.query("Now list the slowest tests.").await?;
+    let turn = client.collect_response().await?;
+    println!("{} messages", turn.len());
 
     client.disconnect().await?;
     Ok(())
 }
 ```
 
-Convenience connection helpers are also available:
+Control methods take `&self`: `interrupt`, `set_permission_mode`, `set_model`,
+`rewind_files`, `reconnect_mcp_server`, `toggle_mcp_server`, `stop_task`,
+`get_mcp_status`, `get_context_usage` and `get_server_info`. Prompts accept
+`impl Into<UserMessageInput>`, so text and images can be combined:
 
-```rust
-client.connect_with_prompt("Start by reading Cargo.toml").await?;
-client.connect_with_stream(prompt_stream).await?;
+```rust,no_run
+use claude_code_sdk_rust::{ClaudeAgentClient, ImageSource, InputContentBlock};
+
+async fn ask_about_image(client: &ClaudeAgentClient) -> claude_code_sdk_rust::Result<()> {
+    let blocks = vec![
+        InputContentBlock::text("What is in this picture?"),
+        InputContentBlock::image(ImageSource::Url {
+            url: "https://example.com/cat.png".into(),
+        }),
+    ];
+    client.query(blocks).await
+}
 ```
 
-## Streaming responses
+### Event streaming
 
-```rust
+`stream_message` sends a prompt and returns a channel of high-level
+`StreamEvent`s (text chunks, tool calls, results) for the turn.
+
+```rust,no_run
 use claude_code_sdk_rust::{ClaudeAgentClient, ClaudeAgentOptions, StreamEvent};
 
 #[tokio::main]
 async fn main() -> claude_code_sdk_rust::Result<()> {
-    let mut client = ClaudeAgentClient::new(ClaudeAgentOptions::default())?;
+    let options = ClaudeAgentOptions::builder()
+        .include_partial_messages(true)
+        .build();
+    let mut client = ClaudeAgentClient::new(options)?;
     client.connect().await?;
 
-    let mut events = client.stream_message("Write a short haiku about compilers.").await?;
+    let mut events = client.stream_message("Write a haiku about compilers.").await?;
     while let Some(event) = events.recv().await {
         match event {
             StreamEvent::ContentChunk(text) => print!("{text}"),
-            StreamEvent::Complete(response) => println!("\nfinished: {:?}", response.stop_reason),
+            StreamEvent::ToolUseStart { name, .. } => println!("\n[tool: {name}]"),
+            StreamEvent::TurnComplete(response) => {
+                println!("\n[done: {:?}]", response.stop_reason);
+                break;
+            }
             StreamEvent::Error(error) => eprintln!("error: {error}"),
             _ => {}
         }
@@ -180,28 +194,35 @@ async fn main() -> claude_code_sdk_rust::Result<()> {
 }
 ```
 
+`ClaudeAgentClient::spawn_stream_message(options, prompt)` does the same
+without managing a client yourself.
+
 ## Configuration
 
-Use `ClaudeAgentOptions::builder()` for ergonomic configuration.
+`ClaudeAgentOptions::builder()` covers the Python `ClaudeAgentOptions` fields.
 
 ```rust
 use claude_code_sdk_rust::{
-    ClaudeAgentOptions, MCPServerConfig, PermissionMode, SettingSource, SkillsConfig,
+    ClaudeAgentOptions, EffortLevel, MCPServerConfig, PermissionMode, SettingSource,
+    SystemPromptPreset, ThinkingConfig,
 };
-use std::collections::HashMap;
-
-let mut env = HashMap::new();
-env.insert("RUST_LOG".to_string(), "info".to_string());
 
 let options = ClaudeAgentOptions::builder()
     .cwd("/path/to/project")
-    .model("claude-sonnet-4-20250514")
-    .system_prompt("You are a careful Rust coding agent.")
+    .model("claude-sonnet-4-5")
+    .system_prompt_preset(
+        SystemPromptPreset::claude_code()
+            .with_append("Prefer small, reviewable diffs.")
+            .with_exclude_dynamic_sections(true)
+            .with_snapshot(true),
+    )
     .allowed_tools(vec!["Read".into(), "Edit".into(), "Bash".into()])
-    .permission_mode(PermissionMode::AskOnFirstUse)
+    .permission_mode(PermissionMode::AcceptEdits)
     .setting_sources(vec![SettingSource::User, SettingSource::Project])
-    .skills(SkillsConfig::All)
-    .env(env)
+    .thinking(ThinkingConfig::adaptive())
+    .effort(EffortLevel::High)
+    .max_turns(20)
+    .env_var("RUST_LOG", "info")
     .mcp_server(
         "docs",
         MCPServerConfig::Stdio {
@@ -210,54 +231,80 @@ let options = ClaudeAgentOptions::builder()
             env: None,
         },
     )
+    .client_app("my-app/1.0")
+    .verbatim_prompts(true)
+    .forward_subagent_text(true)
+    .stderr(|line| eprintln!("[claude] {line}"))
     .build();
 ```
 
-Supported option areas include:
+Option areas include:
 
-- CLI path, working directory, environment, extra CLI args
-- model, fallback model, betas, thinking config, task budgets
-- system prompt presets/files, dynamic prompt controls, skills config
-- allowed/disallowed tools and permission mode
-- `can_use_tool` callback support for streaming/client mode
-- hooks and hook event inclusion
-- stdio, SSE, HTTP, raw/path MCP server config
-- in-process SDK MCP servers
-- sandbox settings
-- session resume, continue, fork, and session-store mirroring
-- stderr callback
-- optional OpenTelemetry context propagation with the `otel` feature
+- CLI path, cwd, env, extra CLI args, `user`, `max_buffer_size`
+- model, fallback model, betas, thinking, effort, task/USD budgets, output format
+- system prompt: text, `SystemPromptPreset`, `SystemPromptCustom`
+  (`system_prompt_custom`, with `with_snapshot`) or `SystemPromptFile`; the
+  setters are mutually exclusive, like the Python union
+- tools / tools preset, allowed/disallowed tools, permission mode,
+  `can_use_tool`, `permission_prompt_tool_name`
+- hooks (with `on_failure`) and hook event forwarding
+- stdio/SSE/HTTP MCP servers and in-process SDK MCP servers
+- agents, skills, plugins, sandbox settings, setting sources
+- session `resume`, `continue_conversation`, `fork_session`, `session_id`,
+  `resume_session_at(message_uuid)`, `resume_drops_turn(prompt_uuid)`, and
+  session-store mirroring
+- `client_app` (sent as `CLAUDE_AGENT_SDK_CLIENT_APP`), `verbatim_prompts`
+  (no `@path` expansion or slash commands), `forward_subagent_text`
+- stderr callback, file checkpointing, partial messages
 
 ## SDK MCP servers
 
-The crate can host in-process SDK MCP tools and bridge them through Claude Code control requests.
+Tools run in-process and are served to the CLI over the control protocol.
+Handlers can be sync (`tool`) or async (`async_tool`, the Python `@tool`
+decorator) and return an `SdkMcpToolResult`. Arguments are validated against
+the input schema before the handler runs.
 
 ```rust
-use claude_code_sdk_rust::{create_sdk_mcp_server, tool, ClaudeAgentOptions, MCPContent};
+use claude_code_sdk_rust::{
+    async_tool, async_tool_with_annotations, create_sdk_mcp_server, ClaudeAgentOptions,
+    MCPToolAnnotations, SdkMcpToolResult,
+};
+use serde_json::json;
 
-let server = create_sdk_mcp_server(
-    "local-tools",
-    vec![tool(
-        "greet",
-        "Greet a user",
-        serde_json::json!({
-            "type": "object",
-            "properties": {"name": {"type": "string"}},
-            "required": ["name"]
-        }),
-        |input| {
-            let name = input.get("name").and_then(|v| v.as_str()).unwrap_or("there");
-            Ok(vec![MCPContent::Text { text: format!("Hello, {name}!") }])
-        },
-    )],
+let greet = async_tool(
+    "greet",
+    "Greet a user",
+    json!({"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}),
+    |args| async move {
+        let name = args["name"].as_str().unwrap_or("there").to_string();
+        SdkMcpToolResult::text(format!("Hello, {name}!"))
+    },
 );
+
+let read_config = async_tool_with_annotations(
+    "read_config",
+    "Read the app config",
+    json!({"type": "object", "properties": {}}),
+    MCPToolAnnotations::new().read_only_hint(true).idempotent_hint(true),
+    |_args| async move {
+        match std::fs::read_to_string("config.toml") {
+            Ok(text) => SdkMcpToolResult::text(text),
+            Err(err) => SdkMcpToolResult::error(err.to_string()),
+        }
+    },
+);
+
+let server = create_sdk_mcp_server("local-tools", vec![greet, read_config]);
 
 let options = ClaudeAgentOptions::builder()
     .sdk_mcp_server("local-tools", server)
+    .allowed_tools(vec!["mcp__local-tools__greet".into()])
     .build();
 ```
 
-Use `create_sdk_mcp_server_with_version` and `tool_with_annotations` when the CLI needs server version metadata or MCP tool annotations.
+`MCPToolAnnotations` hints are `Option<bool>`; only the hints you set are sent.
+To handle raw JSON-RPC yourself, implement the `SdkMcpServer` trait and
+register it with `sdk_mcp_custom_server(name, Arc::new(server))`.
 
 ## Permission callbacks
 
@@ -269,75 +316,115 @@ let options = ClaudeAgentOptions::builder()
         if tool_name == "Bash" {
             return Ok(PermissionResult::deny("Bash is disabled in this run"));
         }
-        println!("allowing {tool_name} with input {input:?}");
+        println!("allowing {tool_name} with {input:?}");
         Ok(PermissionResult::allow())
     })
     .build();
 ```
 
-`can_use_tool` requires streaming/client mode. String-based one-shot `query_messages(...)` rejects this callback because there is no live bidirectional control channel after spawning the subprocess.
+`can_use_tool` works with both the client and one-shot queries; the SDK keeps
+the control channel open for the callback. It cannot be combined with
+`permission_prompt_tool_name`, and a `tracing` warning is logged when
+`allowed_tools` or `BypassPermissions` would shadow it, as in Python.
 
 ## Hooks
 
-Hooks are represented as callback matchers grouped by event name.
+Hook callbacks receive the hook input as JSON and return JSON. The typed
+`SyncHookJSONOutput` / `AsyncHookJSONOutput` and the per-event
+`*HookSpecificOutput` structs convert into it.
 
 ```rust
-use claude_code_sdk_rust::{ClaudeAgentOptions, HookCallback, HookMatcher};
+use claude_code_sdk_rust::{
+    ClaudeAgentOptions, HookCallback, HookEvent, HookMatcher, HookOnFailure,
+    HookPermissionDecision, PreToolUseHookSpecificOutput, SyncHookJSONOutput,
+};
 
-let callback = HookCallback::new(|input, _tool_use_id, _context| async move {
-    println!("hook input: {input:?}");
-    Ok(serde_json::json!({"continue": true}))
+let guard = HookCallback::new(|input, _tool_use_id, _context| async move {
+    let command = input["tool_input"]["command"].as_str().unwrap_or_default();
+    if !command.contains("rm -rf") {
+        return Ok(SyncHookJSONOutput::default().into());
+    }
+    Ok(SyncHookJSONOutput {
+        hook_specific_output: Some(
+            PreToolUseHookSpecificOutput {
+                permission_decision: Some(HookPermissionDecision::Deny),
+                permission_decision_reason: Some("destructive command".into()),
+                ..Default::default()
+            }
+            .into(),
+        ),
+        ..Default::default()
+    }
+    .into())
 });
 
 let options = ClaudeAgentOptions::builder()
-    .hook("PreToolUse", HookMatcher::new(callback).matcher("Edit"))
+    .hook(
+        HookEvent::PreToolUse,
+        HookMatcher::new(guard)
+            .matcher("Bash")
+            .on_failure(HookOnFailure::Block),
+    )
     .include_hook_events(true)
     .build();
 ```
 
+`on_failure(HookOnFailure::Block)` makes a failing callback block the action
+instead of counting as no decision.
+
 ## Sessions
 
-Local Claude transcript helpers are available from the crate root and from `claude_code_sdk_rust::sessions`.
+Local transcript helpers read `~/.claude/projects` and return the Python
+shapes: `SDKSessionInfo` and `SessionMessage`.
 
-```rust
-use claude_code_sdk_rust::{get_session_info, get_session_messages, list_sessions};
+```rust,no_run
+use claude_code_sdk_rust::{
+    get_session_info, get_session_messages, list_sessions, ListSessionsOptions,
+    SessionQueryOptions,
+};
 
 #[tokio::main]
 async fn main() -> claude_code_sdk_rust::Result<()> {
-    let sessions = list_sessions(None).await?;
-
-    for session in sessions {
-        println!("{} {:?}", session.id, session.title);
+    let options = ListSessionsOptions {
+        limit: Some(10),
+        ..Default::default()
+    };
+    for session in list_sessions(&options).await? {
+        println!("{} {}", session.session_id, session.summary);
     }
 
-    let info = get_session_info("session-uuid", None).await?;
-    let messages = get_session_messages("session-uuid", None).await?;
-
-    println!("{info:?}");
-    println!("{} messages", messages.len());
+    let id = "00000000-0000-0000-0000-000000000000";
+    let query = SessionQueryOptions {
+        session_id: id.to_string(),
+        include_messages: true,
+        directory: None,
+        limit: None,
+        offset: None,
+    };
+    if let Some(info) = get_session_info(id, &query).await? {
+        println!("{info:?}");
+    }
+    for message in get_session_messages(id, &query).await? {
+        println!("{} {}", message.r#type, message.uuid);
+    }
     Ok(())
 }
 ```
 
-Session helpers include:
-
-- list, inspect, page, and delete local sessions
-- list and read subagent transcripts
-- rename and tag sessions by appending metadata events
-- fork sessions with remapped IDs
-- import local transcripts into a custom session store
-- store-backed list/read/mutate/fork helpers
+Also available: `list_subagents` / `get_subagent_messages`, `rename_session`,
+`tag_session`, `fork_session`, `delete_session`, `import_session_to_store`,
+and `*_from_store` / `*_via_store` variants for any `SessionStore`.
 
 ## Custom session stores
 
-Implement `SessionStore` for external persistence. Stores can opt into session listing by overriding `supports_list_sessions()` and `list_sessions(...)`.
+Implement `SessionStore` to mirror transcripts to external storage
+(`ClaudeAgentOptions::builder().session_store(store)`). Only `append` and
+`load` are required; listing, summaries, subkeys and delete are opt-in.
+`InMemorySessionStore` is included for tests.
 
 ```rust
 use async_trait::async_trait;
-use claude_code_sdk_rust::{
-    Result, SessionKey, SessionListSubkeysKey, SessionStore, SessionStoreEntry,
-    SessionStoreListEntry,
-};
+use claude_code_sdk_rust::{Result, SessionKey, SessionStore, SessionStoreEntry};
 
 struct MyStore;
 
@@ -352,70 +439,54 @@ impl SessionStore for MyStore {
         println!("load {key:?}");
         Ok(None)
     }
+}
+```
 
-    async fn delete(&self, key: SessionKey) -> Result<()> {
-        println!("delete {key:?}");
-        Ok(())
-    }
+Store adapters that keep summaries can call `fold_session_summary` inside
+`append`.
 
-    async fn list_subkeys(&self, key: SessionListSubkeysKey) -> Result<Vec<String>> {
-        println!("list subkeys for {key:?}");
-        Ok(Vec::new())
-    }
+## Error handling
 
-    fn supports_list_sessions(&self) -> bool {
-        true
-    }
+Functions return `claude_code_sdk_rust::Result<T>` (`Result<T, ClaudeSDKError>`).
+Variants cover CLI discovery (`CLINotFoundError`), connection failures,
+process exits (`ProcessError`), JSON decoding and message parsing. When a run
+ends with an error result, the error is a `ResultError` carrying the result
+`subtype`, `errors`, `api_error_status`, `terminal_reason` and raw payload.
 
-    async fn list_sessions(&self, _project_key: &str) -> Result<Vec<SessionStoreListEntry>> {
-        Ok(Vec::new())
+```rust
+use claude_code_sdk_rust::ClaudeSDKError;
+
+fn report(error: &ClaudeSDKError) {
+    match error {
+        ClaudeSDKError::Result(result) => {
+            eprintln!("run failed ({:?}): {:?}", result.subtype, result.errors)
+        }
+        other if other.is_connection_error() => eprintln!("cannot reach the CLI: {other}"),
+        other => eprintln!("error: {other} (exit code {:?})", other.exit_code()),
     }
 }
 ```
 
-## Error handling
+## Custom transports
 
-Most functions return `claude_code_sdk_rust::Result<T>`, an alias for `Result<T, ClaudeSDKError>`.
-
-Main error variants include:
-
-- `CLIConnectionError`
-- `CLINotFoundError`
-- `ProcessError`
-- `CLIJSONDecodeError`
-- `MessageParseError`
-- generic SDK/configuration errors
+`Transport` is exported for alternative process or network transports;
+`SubprocessCLITransport` is the default. Pass one to
+`ClaudeAgentClient::with_transport` or the `*_with_transport` query functions.
 
 ## Testing
 
-Run the standard suite:
-
 ```bash
 cargo test
+cargo test --features otel
 ```
 
-Run feature verification:
-
-```bash
-cargo check --features otel
-```
-
-Run the ignored real CLI smoke test only when authenticated and prepared for possible API usage:
+The README examples are compiled as doctests. The normal suite never calls
+the paid API; the ignored real-CLI tests run only when the CLI is
+authenticated:
 
 ```bash
 cargo test --test e2e_cli -- --ignored
 ```
-
-## Crate layout
-
-- `client` - interactive client
-- `query` - one-shot query helpers
-- `types` - public SDK data types
-- `options` - builder API
-- `mcp` - SDK MCP server/tool helpers
-- `session_store` - custom store trait and in-memory store
-- `sessions` - local and store-backed session helpers
-- `internal` - CLI args, transport, protocol, control, parsing, mirroring
 
 ## License
 
