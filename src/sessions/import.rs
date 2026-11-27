@@ -1,7 +1,8 @@
 use crate::error::{ClaudeSDKError, Result};
-use crate::session_store::{
-    project_key_for_directory, SessionKey, SessionStoreEntry, SessionStoreHandle,
-};
+use crate::internal::sessions_fs::resolve_session_file_path;
+use crate::session_store::{SessionKey, SessionStoreEntry, SessionStoreHandle};
+use crate::sessions::chain::read_agent_metadata_sidecar;
+use crate::sessions::paths::is_valid_uuid;
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -30,9 +31,19 @@ pub async fn import_session_to_store(
     store: &SessionStoreHandle,
     options: ImportSessionOptions,
 ) -> Result<()> {
-    validate_uuid(session_id)?;
+    if !is_valid_uuid(session_id) {
+        return Err(ClaudeSDKError::Session(format!(
+            "Invalid session_id: {session_id}"
+        )));
+    }
     let resolved = resolve_session_file_path(session_id, options.directory.as_deref())
-        .ok_or_else(|| ClaudeSDKError::Session(format!("Session {session_id} not found")))?;
+        .await
+        .ok_or_else(|| {
+            ClaudeSDKError::IO(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("Session {session_id} not found"),
+            ))
+        })?;
     let project_key = resolved
         .parent()
         .and_then(|path| path.file_name())
@@ -113,68 +124,19 @@ async fn append_jsonl_file_in_batches(
     Ok(())
 }
 
+/// The `.meta.json` sidecar as a synthetic `agent_metadata` entry. A missing,
+/// corrupt or non-object sidecar is treated as absent; other read errors
+/// propagate. The discriminator is set last so a stray `type` key in the
+/// CLI-owned sidecar can never shadow it (`{**meta, "type": "agent_metadata"}`).
 async fn read_meta_sidecar(file_path: &Path) -> Result<Option<SessionStoreEntry>> {
-    let meta_path = file_path.with_file_name(format!(
-        "{}.meta.json",
-        file_path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or_default()
-    ));
-    let content = match tokio::fs::read_to_string(&meta_path).await {
-        Ok(content) => content,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.into()),
+    let Some(mut meta) = read_agent_metadata_sidecar(file_path)? else {
+        return Ok(None);
     };
-    let mut meta = serde_json::from_str::<SessionStoreEntry>(&content)?;
-    let mut entry = SessionStoreEntry::new();
-    entry.insert(
+    meta.insert(
         "type".to_string(),
         serde_json::Value::String("agent_metadata".to_string()),
     );
-    entry.append(&mut meta);
-    Ok(Some(entry))
-}
-
-fn resolve_session_file_path(session_id: &str, directory: Option<&str>) -> Option<PathBuf> {
-    let file_name = format!("{session_id}.jsonl");
-    if let Some(directory) = directory {
-        let canonical = canonicalize_path(Path::new(directory));
-        if let Some(found) =
-            find_project_dir(&canonical).and_then(|dir| stat_candidate(&dir, &file_name))
-        {
-            return Some(found);
-        }
-        return None;
-    }
-
-    let projects_dir = projects_dir();
-    let entries = std::fs::read_dir(projects_dir).ok()?;
-    for entry in entries.flatten() {
-        if entry.file_type().ok().is_some_and(|ty| ty.is_dir()) {
-            if let Some(found) = stat_candidate(&entry.path(), &file_name) {
-                return Some(found);
-            }
-        }
-    }
-    None
-}
-
-fn find_project_dir(project_path: &Path) -> Option<PathBuf> {
-    let exact = projects_dir().join(project_key_for_directory(Some(project_path)));
-    if exact.is_dir() {
-        Some(exact)
-    } else {
-        None
-    }
-}
-
-fn stat_candidate(project_dir: &Path, file_name: &str) -> Option<PathBuf> {
-    let candidate = project_dir.join(file_name);
-    match std::fs::metadata(&candidate) {
-        Ok(metadata) if metadata.is_file() && metadata.len() > 0 => Some(candidate),
-        _ => None,
-    }
+    Ok(Some(meta))
 }
 
 fn collect_jsonl_files(base_dir: &Path) -> Vec<PathBuf> {
@@ -216,29 +178,4 @@ fn subpath_for_file(session_dir: &Path, file_path: &Path) -> Result<String> {
         }
     }
     Ok(parts.join("/"))
-}
-
-fn projects_dir() -> PathBuf {
-    std::env::var_os("CLAUDE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".claude")))
-        .unwrap_or_else(|| PathBuf::from(".claude"))
-        .join("projects")
-}
-
-fn canonicalize_path(path: &Path) -> PathBuf {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(path)
-    };
-    std::fs::canonicalize(&absolute).unwrap_or(absolute)
-}
-
-fn validate_uuid(session_id: &str) -> Result<()> {
-    uuid::Uuid::parse_str(session_id)
-        .map(|_| ())
-        .map_err(|_| ClaudeSDKError::Session(format!("Invalid session_id: {session_id}")))
 }

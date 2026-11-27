@@ -181,3 +181,8 @@ fn options_workstream_exports_are_at_crate_root() {
     let _ = std::mem::size_of::<claude_code_sdk_rust::SystemPromptCustom>();
     let _ = std::mem::size_of::<claude_code_sdk_rust::SystemPrompt>();
 }
+
+#[test]
+fn fold_session_summary_is_exported_at_crate_root() {
+    let _ = claude_code_sdk_rust::fold_session_summary;
+}

@@ -2,14 +2,14 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::error::Result;
 use crate::session_summary::fold_session_summary;
 
-const MAX_SANITIZED_LENGTH: usize = 200;
+use crate::sessions::paths::sanitize_path;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionKey {
@@ -45,7 +45,23 @@ pub trait SessionStore: Send + Sync {
     async fn append(&self, key: SessionKey, entries: Vec<SessionStoreEntry>) -> Result<()>;
     async fn load(&self, key: SessionKey) -> Result<Option<Vec<SessionStoreEntry>>>;
 
+    /// Whether [`SessionStore::list_sessions`] is implemented. Rust cannot
+    /// detect an overridden default method, so stores that implement the
+    /// optional method must also return `true` here.
     fn supports_list_sessions(&self) -> bool {
+        false
+    }
+
+    /// Whether [`SessionStore::list_session_summaries`] is implemented. When
+    /// `true`, `list_sessions_from_store` uses the summary fast path.
+    fn supports_list_session_summaries(&self) -> bool {
+        false
+    }
+
+    /// Whether [`SessionStore::list_subkeys`] is implemented. When `true`,
+    /// resume materializes subagent transcripts and the subagent readers scan
+    /// subkeys; `list_subagents_from_store` requires it.
+    fn supports_list_subkeys(&self) -> bool {
         false
     }
 
@@ -91,6 +107,14 @@ impl SessionStoreHandle {
 
     pub fn supports_list_sessions(&self) -> bool {
         self.0.supports_list_sessions()
+    }
+
+    pub fn supports_list_session_summaries(&self) -> bool {
+        self.0.supports_list_session_summaries()
+    }
+
+    pub fn supports_list_subkeys(&self) -> bool {
+        self.0.supports_list_subkeys()
     }
 
     pub async fn list_sessions(&self, project_key: &str) -> Result<Vec<SessionStoreListEntry>> {
@@ -172,6 +196,14 @@ impl InMemorySessionStore {
 #[async_trait]
 impl SessionStore for InMemorySessionStore {
     fn supports_list_sessions(&self) -> bool {
+        true
+    }
+
+    fn supports_list_session_summaries(&self) -> bool {
+        true
+    }
+
+    fn supports_list_subkeys(&self) -> bool {
         true
     }
 
@@ -264,9 +296,13 @@ impl SessionStore for InMemorySessionStore {
     }
 }
 
+/// Derive the `SessionStore` `project_key` for a directory (default: the
+/// current directory): realpath + NFC + the CLI's sanitization, so keys match
+/// the on-disk project directory names.
 pub fn project_key_for_directory(directory: Option<&Path>) -> String {
-    sanitize_path(&canonicalize_path(
-        directory.unwrap_or_else(|| Path::new(".")),
+    let directory = directory.unwrap_or_else(|| Path::new("."));
+    sanitize_path(&crate::sessions::paths::canonicalize_path(
+        &directory.to_string_lossy(),
     ))
 }
 
@@ -322,57 +358,6 @@ fn next_mtime(last_mtime: i64) -> i64 {
     }
 }
 
-fn canonicalize_path(path: &Path) -> String {
-    let absolute = if path.is_absolute() {
-        PathBuf::from(path)
-    } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(path)
-    };
-    std::fs::canonicalize(&absolute)
-        .unwrap_or(absolute)
-        .to_string_lossy()
-        .to_string()
-}
-
-fn sanitize_path(name: &str) -> String {
-    let sanitized: String = name
-        .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
-        .collect();
-    if sanitized.len() <= MAX_SANITIZED_LENGTH {
-        sanitized
-    } else {
-        format!(
-            "{}-{}",
-            &sanitized[..MAX_SANITIZED_LENGTH],
-            simple_hash(name)
-        )
-    }
-}
-
-fn simple_hash(value: &str) -> String {
-    let mut hash = 0i32;
-    for ch in value.chars() {
-        hash = hash.wrapping_mul(31).wrapping_add(ch as i32);
-    }
-    let mut n = hash.unsigned_abs();
-    if n == 0 {
-        return "0".to_string();
-    }
-    let mut out = Vec::new();
-    while n > 0 {
-        let digit = (n % 36) as u8;
-        out.push(match digit {
-            0..=9 => (b'0' + digit) as char,
-            _ => (b'a' + digit - 10) as char,
-        });
-        n /= 36;
-    }
-    out.iter().rev().collect()
-}
-
 fn normal_components(path: &Path) -> Vec<String> {
     path.components()
         .filter_map(|component| match component {
@@ -385,6 +370,7 @@ fn normal_components(path: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sessions::paths::MAX_SANITIZED_LENGTH;
 
     fn entry(uuid: &str) -> SessionStoreEntry {
         let mut entry = serde_json::Map::new();
@@ -432,7 +418,7 @@ mod tests {
         );
         let long = "a".repeat(MAX_SANITIZED_LENGTH + 1);
         assert!(sanitize_path(&long).starts_with(&"a".repeat(MAX_SANITIZED_LENGTH)));
-        assert_eq!(simple_hash("abc"), "22ci");
+        assert_eq!(crate::sessions::paths::simple_hash("abc"), "22ci");
     }
 
     #[tokio::test]

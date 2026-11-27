@@ -282,3 +282,62 @@ async fn directory_none_keys_from_resolved_path_not_cwd() {
     };
     assert_eq!(store.get_entries(key).await, vec![entry(0)]);
 }
+
+#[tokio::test]
+async fn import_sidecar_type_discriminator_wins_and_corrupt_sidecar_is_absent() {
+    let (_lock, _root, cwd, claude_dir, _guard) = setup("sidecar-type").await;
+    write_jsonl(&claude_dir.join(format!("{SESSION_ID}.jsonl")), &[entry(0)]);
+    let subagents = claude_dir.join(SESSION_ID).join("subagents");
+    write_jsonl(&subagents.join("agent-a.jsonl"), &[entry(1)]);
+    std::fs::write(
+        subagents.join("agent-a.meta.json"),
+        r#"{"type":"stray","agentType":"coder"}"#,
+    )
+    .unwrap();
+    write_jsonl(&subagents.join("agent-b.jsonl"), &[entry(2)]);
+    std::fs::write(subagents.join("agent-b.meta.json"), "{not json").unwrap();
+    write_jsonl(&subagents.join("agent-c.jsonl"), &[entry(3)]);
+    std::fs::write(subagents.join("agent-c.meta.json"), "[1, 2]").unwrap();
+
+    let store = InMemorySessionStore::new();
+    let handle = SessionStoreHandle::new(store.clone());
+    import_session_to_store(
+        SESSION_ID,
+        &handle,
+        ImportSessionOptions {
+            directory: Some(cwd.to_string_lossy().to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let key = |agent: &str| SessionKey {
+        project_key: project_key_for_directory(Some(&cwd)),
+        session_id: SESSION_ID.to_string(),
+        subpath: Some(format!("subagents/agent-{agent}")),
+    };
+    let a = store.get_entries(key("a")).await;
+    assert_eq!(a.len(), 2);
+    assert_eq!(a[1]["type"], "agent_metadata");
+    assert_eq!(a[1]["agentType"], "coder");
+    // `{**meta, "type": ...}` keeps the key's original position.
+    assert_eq!(a[1].keys().next().map(String::as_str), Some("type"));
+    assert_eq!(store.get_entries(key("b")).await, vec![entry(2)]);
+    assert_eq!(store.get_entries(key("c")).await, vec![entry(3)]);
+}
+
+#[tokio::test]
+async fn import_invalid_session_id_is_rejected() {
+    let (_lock, _root, _cwd, _claude_dir, _guard) = setup("invalid-id").await;
+    let handle = SessionStoreHandle::new(InMemorySessionStore::new());
+    // Simple (unhyphenated) UUIDs are not accepted.
+    let err = import_session_to_store(
+        "550e8400e29b41d4a716446655440000",
+        &handle,
+        Default::default(),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("Invalid session_id"));
+}

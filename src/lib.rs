@@ -89,3 +89,6 @@ pub use sessions::{
     LocalForkSessionResult, SDKSessionInfo, SDKSessionMessage, SessionInfo, SessionMessage,
     SessionMutationOptions, SessionQueryOptions,
 };
+
+// Store adapters call this inside append() (Python exports it at the root).
+pub use session_summary::fold_session_summary;
