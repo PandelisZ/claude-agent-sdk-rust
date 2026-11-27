@@ -262,6 +262,95 @@ fn entry(content: &str) -> SessionStoreEntry {
     .clone()
 }
 
+/// Delegates to an in-memory store; `list_subkeys` records the resume
+/// directory being built (found by its transcript) and then never returns.
+struct HangingSubkeyStore {
+    inner: InMemorySessionStore,
+    transcript: std::path::PathBuf,
+    found: std::sync::Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
+}
+
+#[async_trait]
+impl SessionStore for HangingSubkeyStore {
+    fn supports_list_subkeys(&self) -> bool {
+        true
+    }
+
+    async fn append(&self, key: SessionKey, entries: Vec<SessionStoreEntry>) -> crate::Result<()> {
+        self.inner.append(key, entries).await
+    }
+
+    async fn load(&self, key: SessionKey) -> crate::Result<Option<Vec<SessionStoreEntry>>> {
+        self.inner.load(key).await
+    }
+
+    async fn list_subkeys(&self, _key: SessionListSubkeysKey) -> crate::Result<Vec<String>> {
+        let dir = std::fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .find(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("claude-resume-"))
+                    && path.join(&self.transcript).exists()
+            });
+        *self.found.lock().unwrap() = dir;
+        futures::future::pending::<()>().await;
+        Ok(Vec::new())
+    }
+}
+
+#[tokio::test]
+async fn cancelled_materialize_removes_the_half_built_resume_dir() {
+    let cwd = std::env::temp_dir().join(format!("claude-rust-cancel-{}", uuid::Uuid::new_v4()));
+    tokio::fs::create_dir_all(&cwd).await.unwrap();
+    let project_key = project_key_for_directory(Some(&cwd));
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let inner = InMemorySessionStore::new();
+    inner
+        .append(
+            SessionKey {
+                project_key: project_key.clone(),
+                session_id: session_id.clone(),
+                subpath: None,
+            },
+            vec![entry("hi")],
+        )
+        .await
+        .unwrap();
+    let found = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let store = HangingSubkeyStore {
+        inner,
+        transcript: std::path::Path::new("projects")
+            .join(&project_key)
+            .join(format!("{session_id}.jsonl")),
+        found: found.clone(),
+    };
+    let options = ClaudeAgentOptions::builder()
+        .cwd(cwd.to_string_lossy().to_string())
+        .env_var(
+            "CLAUDE_CONFIG_DIR",
+            cwd.join("no-such-config").to_string_lossy().to_string(),
+        )
+        .session_store(store)
+        .resume(session_id)
+        .build();
+
+    // Dropped while waiting on list_subkeys, as under a caller's timeout.
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        materialize_resume_session(&options),
+    )
+    .await;
+    assert!(outcome.is_err(), "materialize should still be waiting");
+    let dir = found
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the resume dir existed while materializing");
+    assert!(!dir.exists(), "resume dir leaked: {}", dir.display());
+    let _ = tokio::fs::remove_dir_all(cwd).await;
+}
+
 #[tokio::test]
 async fn materializes_explicit_resume_to_temp_config_dir() {
     let cwd = std::env::temp_dir().join(format!("claude-rust-resume-cwd-{}", uuid::Uuid::new_v4()));

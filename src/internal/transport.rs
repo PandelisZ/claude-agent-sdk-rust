@@ -88,6 +88,10 @@ pub struct SubprocessCLITransport {
     stdout_decoder: StdoutDecoder,
     stderr: Arc<Mutex<String>>,
     stderr_task: Option<JoinHandle<()>>,
+    /// When `finish_read` stops waiting for the stderr reader to drain. Kept
+    /// in `self` so a `read` cancelled during that wait resumes the same
+    /// wait instead of losing the reader (or restarting the window).
+    stderr_drain_deadline: Option<tokio::time::Instant>,
     exit_error: Option<String>,
     close_stage_timeout: Duration,
 }
@@ -221,6 +225,7 @@ impl SubprocessCLITransport {
             stdout_decoder: StdoutDecoder::new(max_buffer_size),
             stderr: Arc::new(Mutex::new(String::new())),
             stderr_task: None,
+            stderr_drain_deadline: None,
             exit_error: None,
             close_stage_timeout: CLOSE_STAGE_TIMEOUT,
         }
@@ -262,14 +267,15 @@ impl SubprocessCLITransport {
             };
             if returncode != 0 {
                 // Let the stderr reader drain what the CLI wrote before exiting.
-                // Keep the handle only if it is still running: a JoinHandle
-                // must not be polled again after it has completed.
-                if let Some(mut task) = self.stderr_task.take() {
-                    if tokio::time::timeout(Duration::from_millis(500), &mut task)
-                        .await
-                        .is_err()
-                    {
-                        self.stderr_task = Some(task);
+                // The handle is polled in place (cancel-safe: a dropped read
+                // leaves it in `self`) and cleared once it has completed, as
+                // a JoinHandle must not be polled again after that.
+                if let Some(task) = self.stderr_task.as_mut() {
+                    let deadline = *self.stderr_drain_deadline.get_or_insert_with(|| {
+                        tokio::time::Instant::now() + Duration::from_millis(500)
+                    });
+                    if tokio::time::timeout_at(deadline, task).await.is_ok() {
+                        self.stderr_task = None;
                     }
                 }
                 let stderr = self.stderr.lock().await.clone();
@@ -678,6 +684,7 @@ impl Transport for SubprocessCLITransport {
                 .options
                 .max_buffer_size
                 .unwrap_or(DEFAULT_MAX_BUFFER_SIZE);
+            self.stderr_drain_deadline = None;
             self.stderr_task = Some(tokio::spawn(drain_stderr(
                 stderr,
                 self.stderr.clone(),
@@ -768,8 +775,8 @@ impl Transport for SubprocessCLITransport {
 
     async fn read(&mut self) -> Result<Option<Vec<u8>>> {
         loop {
-            if let Some(data) = self.stdout_decoder.next() {
-                return Ok(Some(data));
+            if let Some(item) = self.stdout_decoder.next_item() {
+                return item.map(Some);
             }
 
             let mut chunk = [0u8; 8192];
@@ -783,13 +790,14 @@ impl Transport for SubprocessCLITransport {
 
             match read_result {
                 Ok(0) => {
-                    self.stdout_decoder.finish()?;
-                    if let Some(data) = self.stdout_decoder.next() {
-                        return Ok(Some(data));
+                    self.stdout_decoder.finish();
+                    if let Some(item) = self.stdout_decoder.next_item() {
+                        return item.map(Some);
                     }
                     return self.finish_read().await;
                 }
-                Ok(n) => self.stdout_decoder.push_bytes(&chunk[..n])?,
+                // A decode error is queued behind the frames before it.
+                Ok(n) => self.stdout_decoder.push_bytes(&chunk[..n]),
                 Err(e) => {
                     return Err(
                         CLIConnectionError::new(format!("failed reading stdout: {}", e)).into(),
@@ -1068,6 +1076,73 @@ mod tests {
     }
 
     const RESULT_LINE: &str = r#"{"type":"result","subtype":"success","duration_ms":1,"duration_api_ms":1,"is_error":false,"num_turns":1,"session_id":"s"}"#;
+
+    /// `io_loop` drops a pending `read()` whenever a command arrives; one
+    /// dropped while `finish_read` waits for the stderr reader must not lose
+    /// the reader, or the `ProcessError` loses its stderr tail.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_read_during_stderr_drain_keeps_the_stderr_tail() {
+        // A background subshell holds only stderr open past the exit and
+        // writes to it 300ms later.
+        let (dir, script) =
+            fake_cli("(sleep 0.3; echo 'late stderr line' >&2) >/dev/null </dev/null &\nexit 3\n");
+        let options = crate::types::ClaudeAgentOptions::builder()
+            .cli_path(script.to_string_lossy().to_string())
+            .stderr(|_line| {})
+            .build();
+        let mut transport = SubprocessCLITransport::new(TransportOptions::from(&options));
+        transport.connect().await.unwrap();
+
+        let mut cancelled = 0;
+        let error = loop {
+            match tokio::time::timeout(Duration::from_millis(50), transport.read()).await {
+                Err(_) => cancelled += 1,
+                Ok(result) => break result.expect_err("a non-zero exit is an error"),
+            }
+            assert!(cancelled < 100, "read never finished");
+        };
+        assert!(cancelled > 0, "the read was never cancelled mid-drain");
+        match error {
+            ClaudeSDKError::Process(error) => {
+                assert_eq!(error.exit_code, Some(3));
+                assert!(
+                    error.stderr.contains("late stderr line"),
+                    "stderr tail lost: {:?}",
+                    error.stderr
+                );
+            }
+            other => panic!("expected a ProcessError, got {other:?}"),
+        }
+        transport.close().await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Frames that share a read chunk with a corrupt line are delivered
+    /// before the decode error.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_delivers_frames_before_a_corrupt_line_in_the_same_chunk() {
+        let (dir, script) = fake_cli(&format!(
+            "printf '%s\\n%s\\n' '{RESULT_LINE}' '{{\"type\": oops'\n"
+        ));
+        let options = crate::types::ClaudeAgentOptions::builder()
+            .cli_path(script.to_string_lossy().to_string())
+            .build();
+        let mut transport = SubprocessCLITransport::new(TransportOptions::from(&options));
+        transport.connect().await.unwrap();
+
+        let frame = transport.read().await.unwrap().expect("the result frame");
+        let value: serde_json::Value = serde_json::from_slice(&frame).unwrap();
+        assert_eq!(value["type"], "result");
+        let error = transport.read().await.expect_err("the corrupt line");
+        assert!(
+            matches!(error, ClaudeSDKError::CLIJSONDecode(ref e) if e.line == "{\"type\": oops"),
+            "{error:?}"
+        );
+        transport.close().await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[cfg(unix)]
     #[tokio::test]
