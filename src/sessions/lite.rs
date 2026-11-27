@@ -173,7 +173,7 @@ pub(crate) fn truncate_prompt(text: String) -> String {
         return text;
     }
     let mut truncated: String = text.chars().take(200).collect();
-    truncated.truncate(truncated.trim_end().len());
+    truncated.truncate(crate::sessions::sanitize::py_rstrip(&truncated).len());
     truncated.push('\u{2026}');
     truncated
 }
@@ -218,7 +218,7 @@ pub(crate) fn extract_first_prompt_from_head(head: &str) -> String {
             continue;
         }
         for raw in entry_text_blocks(&entry) {
-            let result = raw.replace('\n', " ").trim().to_string();
+            let result = crate::sessions::sanitize::py_strip(&raw.replace('\n', " ")).to_string();
             if result.is_empty() {
                 continue;
             }

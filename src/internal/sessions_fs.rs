@@ -423,7 +423,7 @@ pub async fn rename_session(session_id: &str, title: &str, directory: Option<&st
     if !is_valid_uuid(session_id) {
         return Err(invalid_session_id(session_id));
     }
-    let title = title.trim();
+    let title = sanitize::py_strip(title);
     if title.is_empty() {
         return Err(ClaudeSDKError::Session(
             "title must be non-empty".to_string(),

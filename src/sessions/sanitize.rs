@@ -34,9 +34,25 @@ pub(crate) fn sanitize_unicode(value: &str) -> String {
     current
 }
 
+/// Python `str.isspace()`: Rust's `White_Space` plus the U+001C..U+001F
+/// information separators, which Python also treats as whitespace.
+pub(crate) fn is_py_space(ch: char) -> bool {
+    ch.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&ch)
+}
+
+/// Python `str.strip()` with no arguments.
+pub(crate) fn py_strip(value: &str) -> &str {
+    value.trim_matches(is_py_space)
+}
+
+/// Python `str.rstrip()` with no arguments.
+pub(crate) fn py_rstrip(value: &str) -> &str {
+    value.trim_end_matches(is_py_space)
+}
+
 /// Tag validation shared by `tag_session` and `tag_session_via_store`.
 pub(crate) fn sanitize_tag(tag: &str) -> Result<String> {
-    let sanitized = sanitize_unicode(tag).trim().to_string();
+    let sanitized = py_strip(&sanitize_unicode(tag)).to_string();
     if sanitized.is_empty() {
         Err(ClaudeSDKError::Session(
             "tag must be non-empty (use None to clear)".to_string(),
@@ -60,5 +76,8 @@ mod tests {
         assert_eq!(sanitize_unicode("a\tb"), "a\tb");
         assert_eq!(sanitize_tag("  a\tb \n").unwrap(), "a\tb");
         assert!(sanitize_tag("\u{200b}\u{200d} ").is_err());
+        // Python's strip() also removes the U+001C..U+001F separators.
+        assert_eq!(sanitize_tag("\u{1c}x\u{1f}").unwrap(), "x");
+        assert_eq!(py_rstrip("a \u{3000}"), "a");
     }
 }

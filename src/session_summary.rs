@@ -129,7 +129,8 @@ fn fold_entry(data: &mut serde_json::Map<String, serde_json::Value>, entry: &Ses
                 );
             }
             None => {
-                data.remove("tag");
+                // Order-preserving, like Python's `dict.pop`.
+                data.shift_remove("tag");
             }
         }
     }
@@ -158,7 +159,7 @@ fn fold_first_prompt(
     }
 
     for raw in lite::entry_text_blocks(entry) {
-        let prompt = raw.replace('\n', " ").trim().to_string();
+        let prompt = crate::sessions::sanitize::py_strip(&raw.replace('\n', " ")).to_string();
         if prompt.is_empty() {
             continue;
         }

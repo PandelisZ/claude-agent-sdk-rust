@@ -249,7 +249,10 @@ pub(crate) fn build_fork_entries(
         );
     }
 
-    let fork_title = match title.map(str::trim).filter(|title| !title.is_empty()) {
+    let fork_title = match title
+        .map(crate::sessions::sanitize::py_strip)
+        .filter(|title| !title.is_empty())
+    {
         Some(title) => title.to_string(),
         None => format!(
             "{} (fork)",
