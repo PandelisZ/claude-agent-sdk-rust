@@ -288,6 +288,10 @@ pub struct SystemPromptPreset {
     pub append: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exclude_dynamic_sections: Option<bool>,
+    /// Send `systemPromptSnapshot` on initialize (Python
+    /// `SystemPromptPreset.snapshot`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

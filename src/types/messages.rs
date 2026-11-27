@@ -400,7 +400,7 @@ impl MessageOrigin {
             return Some(origin);
         }
         let mut extra = map.clone();
-        extra.remove("kind");
+        extra.shift_remove("kind");
         Some(MessageOrigin {
             kind: MessageOriginKind::from(kind),
             server: None,

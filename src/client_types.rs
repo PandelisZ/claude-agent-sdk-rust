@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::types::{ContentBlock, RateLimitInfo};
+use crate::types::{ContentBlock, ConversationResetMessage, RateLimitInfo};
 
 /// Response from sending a message to Claude.
 #[derive(Debug, Clone)]
@@ -43,6 +43,11 @@ pub enum StreamEvent {
     /// The CLI's final result message: the whole turn (including any tool
     /// calls and follow-up assistant messages) is done.
     TurnComplete(MessageResponse),
+    /// The CLI started a new conversation (`conversation_reset`), e.g. after
+    /// `/clear`.
+    ConversationReset(ConversationResetMessage),
+    /// A failure: an error result (its text), a malformed message, a
+    /// transcript-mirror write that was dropped, or the session failing.
     Error(String),
 }
 

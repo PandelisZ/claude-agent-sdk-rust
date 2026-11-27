@@ -340,12 +340,10 @@ impl ResultError {
 /// Feed every non-control message to [`ErrorResultTracker::observe`]; pass
 /// the transport's terminal error through [`ErrorResultTracker::replace`].
 #[derive(Debug, Default, Clone)]
-#[allow(dead_code)]
 pub(crate) struct ErrorResultTracker {
     last_error_result: Option<JsonMap>,
 }
 
-#[allow(dead_code)]
 impl ErrorResultTracker {
     pub(crate) fn new() -> Self {
         Self::default()
@@ -383,6 +381,7 @@ impl ErrorResultTracker {
     }
 
     /// The remembered error result payload, if any.
+    #[cfg(test)]
     pub(crate) fn last_error_result(&self) -> Option<&JsonMap> {
         self.last_error_result.as_ref()
     }

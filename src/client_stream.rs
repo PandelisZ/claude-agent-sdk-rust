@@ -1,4 +1,5 @@
 use crate::client_types::{MessageResponse, StreamEvent};
+use crate::error::error_result_text;
 use crate::types::{ContentBlock, Message};
 
 pub(crate) fn stream_events_from_message(
@@ -102,17 +103,13 @@ pub(crate) fn stream_events_from_message(
             session_id,
             ..
         } => stream_events_from_raw_event(event, session_id),
-        Message::ResultMsg {
-            is_error: true,
-            result,
-            errors,
-            ..
-        } => vec![StreamEvent::Error(
-            errors
-                .as_ref()
-                .map(|errors| errors.join("\n"))
-                .or_else(|| result.clone())
-                .unwrap_or_else(|| "Claude result indicated an error".to_string()),
+        Message::ResultMsg { is_error: true, .. } => vec![StreamEvent::Error(
+            // The same text selection as the ResultError raised after an
+            // error result (errors, then result, then subtype, then status).
+            serde_json::to_value(message)
+                .ok()
+                .and_then(|value| value.as_object().map(error_result_text))
+                .unwrap_or_else(|| "unknown error".to_string()),
         )],
         Message::ResultMsg {
             is_error: false,
@@ -132,6 +129,8 @@ pub(crate) fn stream_events_from_message(
                 .or_else(|| model_usage.clone())
                 .map(|usage| usage.into_iter().collect()),
         })],
+        Message::ConversationResetMsg(reset) => vec![StreamEvent::ConversationReset(reset.clone())],
+        Message::MirrorErrorMsg(mirror) => vec![StreamEvent::Error(mirror.error.clone())],
         _ => Vec::new(),
     }
 }
@@ -255,5 +254,35 @@ mod tests {
         let usage = complete.usage.as_ref().expect("usage should be present");
         assert_eq!(usage.get("input_tokens").and_then(|v| v.as_i64()), Some(11));
         assert_eq!(usage.get("output_tokens").and_then(|v| v.as_i64()), Some(7));
+    }
+
+    #[test]
+    fn error_result_uses_result_error_text_selection() {
+        let message: Message = serde_json::from_value(serde_json::json!({
+            "type": "result", "subtype": "success", "is_error": true,
+            "duration_ms": 1, "duration_api_ms": 1, "num_turns": 1,
+            "session_id": "s", "errors": [], "result": "  API Error: 529 overloaded "
+        }))
+        .unwrap();
+        let events = stream_events_from_message(&message, "fallback");
+        assert!(matches!(
+            events.as_slice(),
+            [StreamEvent::Error(text)] if text == "API Error: 529 overloaded"
+        ));
+    }
+
+    #[test]
+    fn conversation_reset_maps_to_its_own_event() {
+        let message = crate::internal::parser::parse_message_value(serde_json::json!({
+            "type": "conversation_reset", "new_conversation_id": "c2",
+            "uuid": "u", "session_id": "s"
+        }))
+        .unwrap()
+        .unwrap();
+        let events = stream_events_from_message(&message, "fallback");
+        assert!(matches!(
+            events.as_slice(),
+            [StreamEvent::ConversationReset(reset)] if reset.new_conversation_id == "c2"
+        ));
     }
 }

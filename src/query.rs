@@ -1,16 +1,29 @@
-use crate::error::{ClaudeSDKError, Result};
-use crate::internal::control::{
-    initialize_request, initialize_timeout_duration, respond_to_control_request,
-    send_control_request_with_callbacks_and_timeout, ControlCallbacks,
+//! One-shot queries (Python `query()`).
+//!
+//! Every entry point connects, sends the prompt, and reads messages until
+//! the CLI's output ends (so every result of a multi-prompt stream, and
+//! follow-up turns woken by background tasks, are included). Control
+//! requests are answered by the background runtime throughout. stdin is
+//! closed once the run is over: right after the prompt when nothing needs
+//! the control channel, otherwise when the run ends (session state `idle`,
+//! or the result with no tracked background task in flight, bounded by
+//! `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS`).
+
+use crate::error::Result;
+use crate::internal::control::initialize_timeout_duration;
+use crate::internal::runtime::{MessageStream, Runtime, RuntimeConfig, Shared};
+use crate::internal::session_resume::{
+    apply_materialized_options, materialize_resume_session, MaterializedResume,
 };
-use crate::internal::parser::parse_message_line;
-use crate::internal::session_resume::{apply_materialized_options, materialize_resume_session};
 use crate::internal::session_store_validation::validate_session_store_options;
-use crate::internal::transcript_mirror::TranscriptMirrorBatcher;
 use crate::internal::transport::{SubprocessCLITransport, Transport, TransportOptions};
+use crate::types::config::warn_if_can_use_tool_shadowed;
 use crate::types::{ClaudeAgentOptions, Message};
+use futures::stream::BoxStream;
 use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
+use std::future::Future;
+use std::sync::Arc;
 
 /// Token usage information from a query response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,6 +42,53 @@ pub struct QueryResult {
     pub usage: Option<TokenUsage>,
     /// The reason the response finished (e.g., "end_turn", "max_tokens").
     pub finish_reason: String,
+}
+
+/// The prompt of a streaming one-shot query (Python
+/// `prompt: str | AsyncIterable[dict]`).
+pub enum QueryPrompt {
+    /// A single user prompt.
+    Text(String),
+    /// Raw stream-json messages, each written as one line, as given (apart
+    /// from the `verbatim_prompts` stamp).
+    Messages(BoxStream<'static, serde_json::Value>),
+}
+
+impl QueryPrompt {
+    /// A prompt streamed from `messages`.
+    pub fn messages<S>(messages: S) -> Self
+    where
+        S: Stream<Item = serde_json::Value> + Send + 'static,
+    {
+        QueryPrompt::Messages(messages.boxed())
+    }
+}
+
+impl std::fmt::Debug for QueryPrompt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            QueryPrompt::Text(text) => f.debug_tuple("Text").field(text).finish(),
+            QueryPrompt::Messages(_) => f.debug_tuple("Messages").field(&"<stream>").finish(),
+        }
+    }
+}
+
+impl From<String> for QueryPrompt {
+    fn from(text: String) -> Self {
+        QueryPrompt::Text(text)
+    }
+}
+
+impl From<&str> for QueryPrompt {
+    fn from(text: &str) -> Self {
+        QueryPrompt::Text(text.to_string())
+    }
+}
+
+impl From<BoxStream<'static, serde_json::Value>> for QueryPrompt {
+    fn from(messages: BoxStream<'static, serde_json::Value>) -> Self {
+        QueryPrompt::Messages(messages)
+    }
 }
 
 /// Perform a one-shot query to Claude Code.
@@ -65,242 +125,329 @@ pub async fn query(
     Ok(summarize_messages(messages))
 }
 
+/// Stream a one-shot query's messages as they arrive (Python `query()`).
+///
+/// The prompt is a string or a [`QueryPrompt::messages`] stream. The CLI is
+/// started on the first poll. The stream ends when the CLI's output ends;
+/// an error (including a malformed message) is the last item. Dropping the
+/// stream early closes the session in the background.
+///
+/// ```rust,no_run
+/// use futures::StreamExt;
+/// use claude_code_sdk_rust::{stream_query, Message};
+///
+/// # async fn example() -> claude_code_sdk_rust::Result<()> {
+/// let mut messages = stream_query("What is Rust?", None);
+/// while let Some(message) = messages.next().await {
+///     if let Message::ResultMsg { result, .. } = message? {
+///         println!("{result:?}");
+///     }
+/// }
+/// # Ok(())
+/// # }
+/// ```
+pub fn stream_query(
+    prompt: impl Into<QueryPrompt>,
+    options: Option<ClaudeAgentOptions>,
+) -> MessageStream {
+    run_stream_query(prompt.into(), options.unwrap_or_default(), None)
+}
+
+/// [`stream_query`] over a caller-supplied transport. Options that become CLI
+/// flags are not applied to it, and store-backed resume is skipped.
+pub fn stream_query_with_transport(
+    prompt: impl Into<QueryPrompt>,
+    options: Option<ClaudeAgentOptions>,
+    transport: Box<dyn Transport>,
+) -> MessageStream {
+    run_stream_query(prompt.into(), options.unwrap_or_default(), Some(transport))
+}
+
 /// Perform a one-shot query and return the full message sequence.
 ///
-/// This is the Rust equivalent of the Python SDK's `query()` async iterator,
-/// adapted to return the collected messages as a `Vec<Message>`.
+/// The collected form of [`stream_query`]: fails on the first error.
 pub async fn query_messages(
     prompt: impl Into<String>,
     options: Option<ClaudeAgentOptions>,
 ) -> Result<Vec<Message>> {
     let prompt = prompt.into();
-    let mut options = options.unwrap_or_default();
-    if options.can_use_tool.is_some() {
-        return Err(ClaudeSDKError::Other(
-            "can_use_tool callback requires streaming mode. \
-             Please use ClaudeAgentClient instead of query_messages with a string prompt."
-                .to_string(),
-        ));
-    }
-    validate_session_store_options(&options)?;
-    let materialized = materialize_resume_session(&options).await?;
-    if let Some(materialized) = &materialized {
-        options = apply_materialized_options(&options, materialized);
-    }
-    let result = run_query_messages(prompt, options).await;
-    if let Some(materialized) = &materialized {
-        materialized.cleanup().await;
-    }
-    result
+    collect_query(options.unwrap_or_default(), None, move |shared| {
+        send_text_prompt(shared, prompt)
+    })
+    .await
 }
 
+/// [`query_messages`] over a caller-supplied transport.
 pub async fn query_messages_with_transport(
     prompt: impl Into<String>,
     options: Option<ClaudeAgentOptions>,
     transport: Box<dyn Transport>,
 ) -> Result<Vec<Message>> {
     let prompt = prompt.into();
-    let options = options.unwrap_or_default();
-    if options.can_use_tool.is_some() {
-        return Err(ClaudeSDKError::Other(
-            "can_use_tool callback requires streaming mode. \
-             Please use ClaudeAgentClient instead of query_messages with a string prompt."
-                .to_string(),
-        ));
-    }
-    validate_session_store_options(&options)?;
-    run_query_messages_with_transport(prompt, options, transport).await
+    collect_query(
+        options.unwrap_or_default(),
+        Some(transport),
+        move |shared| send_text_prompt(shared, prompt),
+    )
+    .await
 }
 
 /// Perform a one-shot query from a stream of raw prompt messages.
 ///
-/// Each streamed value is written to the Claude Code transport as one JSON line.
-/// If a message is an object and does not include `session_id`, `"default"` is
-/// inserted to match the interactive client's streaming prompt behavior.
+/// Each streamed value is written to the CLI as one JSON line, as given
+/// (apart from the `verbatim_prompts` stamp); unlike
+/// [`crate::ClaudeAgentClient::query_stream`] no `session_id` is filled in.
 pub async fn query_stream_messages<S>(
     stream: S,
     options: Option<ClaudeAgentOptions>,
 ) -> Result<Vec<Message>>
 where
-    S: Stream<Item = serde_json::Value> + Unpin,
+    S: Stream<Item = serde_json::Value>,
 {
-    let mut options = options.unwrap_or_default();
-    validate_session_store_options(&options)?;
-    let materialized = materialize_resume_session(&options).await?;
-    if let Some(materialized) = &materialized {
-        options = apply_materialized_options(&options, materialized);
-    }
-    let result = run_query_stream_messages(stream, options).await;
-    if let Some(materialized) = &materialized {
-        materialized.cleanup().await;
-    }
-    result
+    collect_query(
+        options.unwrap_or_default(),
+        None,
+        move |shared| async move { shared.stream_input(stream).await },
+    )
+    .await
 }
 
+/// [`query_stream_messages`] over a caller-supplied transport.
 pub async fn query_stream_messages_with_transport<S>(
     stream: S,
     options: Option<ClaudeAgentOptions>,
     transport: Box<dyn Transport>,
 ) -> Result<Vec<Message>>
 where
-    S: Stream<Item = serde_json::Value> + Unpin,
+    S: Stream<Item = serde_json::Value>,
 {
-    let options = options.unwrap_or_default();
-    validate_session_store_options(&options)?;
-    run_query_stream_messages_with_transport(stream, options, transport).await
-}
-
-async fn run_query_messages(prompt: String, options: ClaudeAgentOptions) -> Result<Vec<Message>> {
-    // Create transport with options
-    let transport_options = TransportOptions::from(&options);
-    let transport = SubprocessCLITransport::new(transport_options);
-    run_query_messages_with_transport(prompt, options, Box::new(transport)).await
-}
-
-async fn run_query_stream_messages<S>(
-    stream: S,
-    options: ClaudeAgentOptions,
-) -> Result<Vec<Message>>
-where
-    S: Stream<Item = serde_json::Value> + Unpin,
-{
-    let transport_options = TransportOptions::from(&options);
-    let transport = SubprocessCLITransport::new(transport_options);
-    run_query_stream_messages_with_transport(stream, options, Box::new(transport)).await
-}
-
-async fn run_query_messages_with_transport(
-    prompt: String,
-    options: ClaudeAgentOptions,
-    mut transport: Box<dyn Transport>,
-) -> Result<Vec<Message>> {
-    let control_callbacks = ControlCallbacks::from_options(&options);
-    let mut transcript_mirror = TranscriptMirrorBatcher::from_options(&options);
-
-    // Connect to the CLI
-    transport.connect().await?;
-    send_control_request_with_callbacks_and_timeout(
-        transport.as_mut(),
-        initialize_request(&control_callbacks),
-        &control_callbacks,
-        initialize_timeout_duration(),
+    collect_query(
+        options.unwrap_or_default(),
+        Some(transport),
+        move |shared| async move { shared.stream_input(stream).await },
     )
-    .await?;
+    .await
+}
 
-    // Build and send the user message
-    let user_message = serde_json::json!({
+/// A connected one-shot session; closed (and its materialized resume
+/// directory removed) by [`QuerySession::close`], or in the background when
+/// dropped.
+struct QuerySession {
+    runtime: Option<Runtime>,
+    materialized: Option<MaterializedResume>,
+}
+
+impl QuerySession {
+    /// Python `InternalClient.process_query` up to the prompt: validate,
+    /// materialize a store-backed resume (default transport only), connect,
+    /// start the reader and initialize. Tears everything down on failure.
+    async fn open(
+        options: ClaudeAgentOptions,
+        transport: Option<Box<dyn Transport>>,
+    ) -> Result<Self> {
+        validate_session_store_options(&options)?;
+        warn_if_can_use_tool_shadowed(&options);
+        let custom_transport = transport.is_some();
+        let materialized = if custom_transport {
+            None
+        } else {
+            materialize_resume_session(&options).await?
+        };
+        let mut session = QuerySession {
+            runtime: None,
+            materialized,
+        };
+        let options = match &session.materialized {
+            Some(materialized) => apply_materialized_options(&options, materialized),
+            None => options,
+        };
+        let mut transport = transport.unwrap_or_else(|| {
+            Box::new(SubprocessCLITransport::new(TransportOptions::from(
+                &options,
+            )))
+        });
+        if let Err(error) = transport.connect().await {
+            let _ = transport.close().await;
+            session.close().await;
+            return Err(error);
+        }
+        let (runtime, init) = Runtime::start(
+            transport,
+            RuntimeConfig::from_options(&options, !custom_transport),
+        );
+        let runtime = session.runtime.insert(runtime);
+        if let Err(error) = runtime
+            .finish_initialize(init, initialize_timeout_duration())
+            .await
+        {
+            session.close().await;
+            return Err(error);
+        }
+        Ok(session)
+    }
+
+    fn runtime(&self) -> &Runtime {
+        self.runtime.as_ref().expect("query session is open")
+    }
+
+    /// Start the prompt in the background (for [`stream_query`]).
+    async fn spawn_prompt(&self, prompt: QueryPrompt) -> Result<()> {
+        let runtime = self.runtime();
+        match prompt {
+            QueryPrompt::Text(prompt) => {
+                let shared = runtime.shared();
+                shared
+                    .write_json(&shared.stamp(text_prompt(prompt)))
+                    .await?;
+                runtime.spawn_end_input_after_run();
+            }
+            QueryPrompt::Messages(messages) => runtime.spawn_stream_input(messages),
+        }
+        Ok(())
+    }
+
+    /// Close the runtime (and transport) before removing the materialized
+    /// resume directory the CLI was reading.
+    async fn close(&mut self) {
+        if let Some(runtime) = self.runtime.take() {
+            let (result, _) = runtime.close().await;
+            if let Err(error) = result {
+                tracing::debug!("Error closing the query transport: {error}");
+            }
+        }
+        if let Some(materialized) = self.materialized.take() {
+            materialized.cleanup().await;
+        }
+    }
+}
+
+impl Drop for QuerySession {
+    fn drop(&mut self) {
+        let runtime = self.runtime.take();
+        let materialized = self.materialized.take();
+        if runtime.is_none() && materialized.is_none() {
+            return;
+        }
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    let mut session = QuerySession {
+                        runtime,
+                        materialized,
+                    };
+                    session.close().await;
+                });
+            }
+            Err(_) => drop(runtime),
+        }
+    }
+}
+
+/// The user message a string prompt is sent as.
+fn text_prompt(prompt: String) -> serde_json::Value {
+    serde_json::json!({
         "type": "user",
         "session_id": "",
-        "message": {
-            "role": "user",
-            "content": prompt
-        },
-        "parent_tool_use_id": null
-    });
-
-    transport
-        .write(format!("{}\n", user_message).as_bytes())
-        .await?;
-
-    let mut messages = Vec::new();
-
-    // Read messages until we get the result
-    while let Some(data) = transport.read().await? {
-        let line = String::from_utf8_lossy(&data);
-        let value = serde_json::from_slice::<serde_json::Value>(&data)?;
-        if value.get("type").and_then(|v| v.as_str()) == Some("control_request") {
-            respond_to_control_request(transport.as_mut(), &value, &control_callbacks).await?;
-            continue;
-        }
-        if value.get("type").and_then(|v| v.as_str()) == Some("transcript_mirror") {
-            if let Some(batcher) = &mut transcript_mirror {
-                messages.extend(batcher.enqueue_value(&value).await?);
-            }
-            continue;
-        }
-        match parse_message_line(&line)? {
-            Some(message @ Message::ResultMsg { .. }) => {
-                flush_transcript_mirror(&mut transcript_mirror).await?;
-                messages.push(message);
-                break;
-            }
-            Some(message) => {
-                messages.push(message);
-            }
-            None => {}
-        }
-    }
-
-    // Close the transport
-    flush_transcript_mirror(&mut transcript_mirror).await?;
-    transport.close().await?;
-
-    Ok(messages)
+        "message": {"role": "user", "content": prompt},
+        "parent_tool_use_id": null,
+    })
 }
 
-async fn run_query_stream_messages_with_transport<S>(
-    mut stream: S,
+/// Write the string prompt, then close stdin once the run ends.
+async fn send_text_prompt(shared: Arc<Shared>, prompt: String) {
+    if let Err(error) = shared.write_json(&shared.stamp(text_prompt(prompt))).await {
+        tracing::error!("Failed to write the prompt; closing stdin: {error}");
+    }
+    if let Err(error) = shared.wait_for_result_and_end_input().await {
+        tracing::debug!("Error closing input stream: {error}");
+    }
+}
+
+/// Run a query to completion, driving `send_prompt` alongside the reader.
+async fn collect_query<F, Fut>(
     options: ClaudeAgentOptions,
-    mut transport: Box<dyn Transport>,
+    transport: Option<Box<dyn Transport>>,
+    send_prompt: F,
 ) -> Result<Vec<Message>>
 where
-    S: Stream<Item = serde_json::Value> + Unpin,
+    F: FnOnce(Arc<Shared>) -> Fut,
+    Fut: Future<Output = ()>,
 {
-    let control_callbacks = ControlCallbacks::from_options(&options);
-    let mut transcript_mirror = TranscriptMirrorBatcher::from_options(&options);
+    let mut session = QuerySession::open(options, transport).await?;
+    let result = {
+        let mut messages = session.runtime().messages(false);
+        let input = send_prompt(Arc::clone(session.runtime().shared()));
+        tokio::pin!(input);
+        let mut input_done = false;
+        let mut collected = Vec::new();
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut input, if !input_done => input_done = true,
+                item = messages.next() => match item {
+                    Some(Ok(message)) => collected.push(message),
+                    Some(Err(error)) => break Err(error),
+                    None => break Ok(collected),
+                },
+            }
+        }
+    };
+    session.close().await;
+    result
+}
 
-    transport.connect().await?;
-    send_control_request_with_callbacks_and_timeout(
-        transport.as_mut(),
-        initialize_request(&control_callbacks),
-        &control_callbacks,
-        initialize_timeout_duration(),
+fn run_stream_query(
+    prompt: QueryPrompt,
+    options: ClaudeAgentOptions,
+    transport: Option<Box<dyn Transport>>,
+) -> MessageStream {
+    #[allow(clippy::large_enum_variant)] // the one-off start state
+    enum State {
+        Start(QueryPrompt, ClaudeAgentOptions, Option<Box<dyn Transport>>),
+        Running(QuerySession, MessageStream),
+        Done,
+    }
+    futures::stream::unfold(
+        State::Start(prompt, options, transport),
+        |mut state| async move {
+            loop {
+                match state {
+                    State::Start(prompt, options, transport) => {
+                        let mut session = match QuerySession::open(options, transport).await {
+                            Ok(session) => session,
+                            Err(error) => return Some((Err(error), State::Done)),
+                        };
+                        let messages = session.runtime().messages(false);
+                        if let Err(error) = session.spawn_prompt(prompt).await {
+                            drop(messages);
+                            session.close().await;
+                            return Some((Err(error), State::Done));
+                        }
+                        state = State::Running(session, messages);
+                    }
+                    State::Running(mut session, mut messages) => {
+                        return match messages.next().await {
+                            Some(Ok(message)) => {
+                                Some((Ok(message), State::Running(session, messages)))
+                            }
+                            Some(Err(error)) => {
+                                drop(messages);
+                                session.close().await;
+                                Some((Err(error), State::Done))
+                            }
+                            None => {
+                                drop(messages);
+                                session.close().await;
+                                None
+                            }
+                        };
+                    }
+                    State::Done => return None,
+                }
+            }
+        },
     )
-    .await?;
-
-    while let Some(mut message) = stream.next().await {
-        if let Some(object) = message.as_object_mut() {
-            object
-                .entry("session_id")
-                .or_insert_with(|| serde_json::Value::String("default".to_string()));
-        }
-        let mut json_payload = serde_json::to_vec(&message)?;
-        json_payload.push(b'\n');
-        transport.write(&json_payload).await?;
-    }
-    transport.close_input().await?;
-
-    let mut messages = Vec::new();
-    while let Some(data) = transport.read().await? {
-        let line = String::from_utf8_lossy(&data);
-        let value = serde_json::from_slice::<serde_json::Value>(&data)?;
-        if value.get("type").and_then(|v| v.as_str()) == Some("control_request") {
-            respond_to_control_request(transport.as_mut(), &value, &control_callbacks).await?;
-            continue;
-        }
-        if value.get("type").and_then(|v| v.as_str()) == Some("transcript_mirror") {
-            if let Some(batcher) = &mut transcript_mirror {
-                messages.extend(batcher.enqueue_value(&value).await?);
-            }
-            continue;
-        }
-        match parse_message_line(&line)? {
-            Some(message @ Message::ResultMsg { .. }) => {
-                flush_transcript_mirror(&mut transcript_mirror).await?;
-                messages.push(message);
-                break;
-            }
-            Some(message) => {
-                messages.push(message);
-            }
-            None => {}
-        }
-    }
-
-    flush_transcript_mirror(&mut transcript_mirror).await?;
-    transport.close().await?;
-
-    Ok(messages)
+    .boxed()
 }
 
 fn summarize_messages(messages: Vec<Message>) -> QueryResult {
@@ -344,15 +491,6 @@ fn summarize_messages(messages: Vec<Message>) -> QueryResult {
         usage,
         finish_reason,
     }
-}
-
-async fn flush_transcript_mirror(
-    transcript_mirror: &mut Option<TranscriptMirrorBatcher>,
-) -> Result<()> {
-    if let Some(batcher) = transcript_mirror {
-        let _ = batcher.flush().await?;
-    }
-    Ok(())
 }
 
 /// Extract TokenUsage from a JSON map.

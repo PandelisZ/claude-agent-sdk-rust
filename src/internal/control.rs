@@ -1,22 +1,46 @@
+//! Control protocol payloads and handlers (Python `_internal/query.py`).
+//!
+//! The SDK and the CLI exchange `control_request` / `control_response`
+//! frames over stdin/stdout. This module builds the payloads, answers the
+//! requests the CLI sends (`can_use_tool`, `hook_callback`, `mcp_message`) and
+//! provides low-level helpers that drive a single control request over a bare
+//! [`Transport`]. The client and the query entry points route control frames
+//! through the background runtime in [`crate::internal::runtime`] instead.
+
 use crate::error::{CLIConnectionError, ClaudeSDKError, Result};
 use crate::internal::sdk_mcp::answer_mcp_control_request;
 use crate::internal::transport::Transport;
+use crate::types::config::{permission_suggestions_from_values, permission_updates_to_wire};
+use crate::types::hooks::{hook_matcher_wire_config, hooks_block_on_failure};
 use crate::types::{
     CanUseToolCallback, ClaudeAgentOptions, HookCallback, HookContext, PermissionResult,
-    PermissionUpdate, SkillsConfig, ToolPermissionContext,
+    SkillsConfig, ToolPermissionContext,
 };
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
+/// Everything needed to build the initialize request and answer the control
+/// requests the CLI sends.
 #[derive(Debug, Clone, Default)]
 pub struct ControlCallbacks {
     pub can_use_tool: Option<CanUseToolCallback>,
-    pub sdk_mcp_servers: HashMap<String, crate::mcp::SimpleMCPServer>,
+    /// Shared (not cloned) by every concurrently running `mcp_message`
+    /// handler, so duplicate-id detection and `notifications/cancelled` see
+    /// one in-flight table per server.
+    pub sdk_mcp_servers: Arc<HashMap<String, crate::mcp::SimpleMCPServer>>,
     pub hook_callbacks: HashMap<String, HookCallback>,
     pub hooks_config: Option<serde_json::Value>,
     pub agents: Option<serde_json::Value>,
     pub exclude_dynamic_sections: Option<bool>,
+    /// `systemPromptSnapshot` (preset or custom system prompt `snapshot`).
+    pub system_prompt_snapshot: Option<bool>,
     pub skills: Option<Vec<String>>,
+    /// Send `forwardSubagentText: true` on initialize.
+    pub forward_subagent_text: bool,
+    /// Some hook matcher fails closed (`on_failure` other than `"continue"`),
+    /// so the initialize response must confirm the CLI honors it.
+    pub hooks_block_on_failure: bool,
 }
 
 impl ControlCallbacks {
@@ -24,22 +48,23 @@ impl ControlCallbacks {
         let (hooks_config, hook_callbacks) = build_hooks_config(options);
         Self {
             can_use_tool: options.can_use_tool.clone(),
-            sdk_mcp_servers: options.sdk_mcp_servers.clone(),
+            sdk_mcp_servers: Arc::new(options.sdk_mcp_servers.clone()),
             hook_callbacks,
             hooks_config,
             agents: agents_config(options),
-            exclude_dynamic_sections: options
-                .system_prompt_preset
-                .as_ref()
-                .and_then(|preset| preset.exclude_dynamic_sections),
+            exclude_dynamic_sections: options.exclude_dynamic_sections(),
+            system_prompt_snapshot: options.system_prompt_snapshot(),
             skills: match &options.skills {
                 Some(SkillsConfig::Names(skills)) => Some(skills.clone()),
                 Some(SkillsConfig::All) | None => None,
             },
+            forward_subagent_text: options.forward_subagent_text,
+            hooks_block_on_failure: hooks_block_on_failure(&options.hooks),
         }
     }
 }
 
+/// The `initialize` control request body (Python `Query.initialize`).
 pub fn initialize_request(callbacks: &ControlCallbacks) -> serde_json::Value {
     let mut request = serde_json::Map::new();
     request.insert(
@@ -62,8 +87,20 @@ pub fn initialize_request(callbacks: &ControlCallbacks) -> serde_json::Value {
             serde_json::Value::Bool(exclude_dynamic_sections),
         );
     }
+    if let Some(snapshot) = callbacks.system_prompt_snapshot {
+        request.insert(
+            "systemPromptSnapshot".to_string(),
+            serde_json::Value::Bool(snapshot),
+        );
+    }
     if let Some(skills) = &callbacks.skills {
         request.insert("skills".to_string(), serde_json::json!(skills));
+    }
+    if callbacks.forward_subagent_text {
+        request.insert(
+            "forwardSubagentText".to_string(),
+            serde_json::Value::Bool(true),
+        );
     }
 
     serde_json::Value::Object(request)
@@ -105,6 +142,23 @@ pub fn control_error_response_payload(request_id: &str, error: &str) -> serde_js
     })
 }
 
+pub fn control_success_response_payload(
+    request_id: &str,
+    response: serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "type": "control_response",
+        "response": {
+            "subtype": "success",
+            "request_id": request_id,
+            "response": response,
+        },
+    })
+}
+
+/// Drive one control request over a bare transport, answering any control
+/// request the CLI sends meanwhile. Other frames read while waiting are
+/// discarded; sessions use the background runtime instead.
 pub async fn send_control_request(
     transport: &mut dyn Transport,
     request: serde_json::Value,
@@ -112,6 +166,7 @@ pub async fn send_control_request(
     send_control_request_with_callbacks(transport, request, &ControlCallbacks::default()).await
 }
 
+/// [`send_control_request`] with callbacks for the CLI's own requests.
 pub async fn send_control_request_with_callbacks(
     transport: &mut dyn Transport,
     request: serde_json::Value,
@@ -132,12 +187,8 @@ pub(crate) async fn send_control_request_with_callbacks_and_timeout(
     callbacks: &ControlCallbacks,
     timeout_duration: Duration,
 ) -> Result<serde_json::Map<String, serde_json::Value>> {
-    let request_id = format!("req_{}", uuid::Uuid::new_v4().simple());
-    let subtype = request
-        .get("subtype")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown")
-        .to_string();
+    let request_id = new_request_id(1);
+    let subtype = request_subtype(&request);
     match tokio::time::timeout(
         timeout_duration,
         send_control_request_with_id(transport, &request_id, request, callbacks),
@@ -145,10 +196,26 @@ pub(crate) async fn send_control_request_with_callbacks_and_timeout(
     .await
     {
         Ok(result) => result,
-        Err(_) => Err(ClaudeSDKError::Other(format!(
-            "Control request timeout: {subtype}"
-        ))),
+        Err(_) => Err(control_timeout_error(&subtype)),
     }
+}
+
+/// `req_{counter}_{8 hex}` (Python `f"req_{n}_{os.urandom(4).hex()}"`).
+pub(crate) fn new_request_id(counter: u64) -> String {
+    let random = uuid::Uuid::new_v4().simple().to_string();
+    format!("req_{counter}_{}", &random[..8])
+}
+
+pub(crate) fn request_subtype(request: &serde_json::Value) -> String {
+    request
+        .get("subtype")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+pub(crate) fn control_timeout_error(subtype: &str) -> ClaudeSDKError {
+    ClaudeSDKError::Other(format!("Control request timeout: {subtype}"))
 }
 
 pub(crate) fn initialize_timeout_duration() -> Duration {
@@ -173,11 +240,7 @@ async fn send_control_request_with_id(
     request: serde_json::Value,
     callbacks: &ControlCallbacks,
 ) -> Result<serde_json::Map<String, serde_json::Value>> {
-    let subtype = request
-        .get("subtype")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown")
-        .to_string();
+    let subtype = request_subtype(&request);
     let payload = control_request_payload(request_id, request);
     let mut encoded = serde_json::to_vec(&payload)?;
     encoded.push(b'\n');
@@ -210,97 +273,97 @@ fn matching_control_response<'a>(
     (response_id == request_id).then_some(response)
 }
 
-fn parse_control_response(
+/// Turn a `control_response.response` object into the request's result:
+/// `subtype: "error"` fails with its `error` text, anything else succeeds
+/// with the inner `response` object (`{}` when absent or not an object).
+pub(crate) fn parse_control_response(
     response: &serde_json::Map<String, serde_json::Value>,
     subtype: &str,
 ) -> Result<serde_json::Map<String, serde_json::Value>> {
-    match response.get("subtype").and_then(|v| v.as_str()) {
-        Some("success") => Ok(response
-            .get("response")
-            .and_then(|v| v.as_object())
-            .cloned()
-            .unwrap_or_default()),
-        Some("error") => Err(ClaudeSDKError::ControlRequest {
+    if response.get("subtype").and_then(|v| v.as_str()) == Some("error") {
+        return Err(ClaudeSDKError::ControlRequest {
             subtype: subtype.to_string(),
             message: response
                 .get("error")
                 .and_then(|v| v.as_str())
-                .unwrap_or("unknown control request error")
+                .unwrap_or("Unknown error")
                 .to_string(),
-        }),
-        _ => Err(ClaudeSDKError::ControlRequest {
-            subtype: subtype.to_string(),
-            message: "malformed control response".to_string(),
-        }),
+        });
     }
+    Ok(response
+        .get("response")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default())
 }
 
+/// Answer a control request inline on `transport`.
 pub(crate) async fn respond_to_control_request(
     transport: &mut dyn Transport,
     value: &serde_json::Value,
     callbacks: &ControlCallbacks,
 ) -> Result<()> {
-    let Some(request_id) = value.get("request_id").and_then(|v| v.as_str()) else {
+    let Some(response) = control_request_response(callbacks, value).await else {
         return Ok(());
     };
-    let request = value
-        .get("request")
-        .and_then(|request| request.as_object())
-        .cloned()
-        .unwrap_or_default();
-    let subtype = value
-        .get("request")
-        .and_then(|request| request.get("subtype"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-
-    if subtype == "can_use_tool" {
-        let response = match answer_can_use_tool(&request, callbacks).await {
-            Ok(response) => control_success_response_payload(request_id, response),
-            Err(error) => control_error_response_payload(request_id, &error.to_string()),
-        };
-        let mut encoded = serde_json::to_vec(&response)?;
-        encoded.push(b'\n');
-        return transport.write(&encoded).await;
-    }
-
-    if subtype == "mcp_message" {
-        let response = match answer_mcp_control_request(&callbacks.sdk_mcp_servers, &request).await
-        {
-            Ok(response) => control_success_response_payload(request_id, response),
-            Err(error) => control_error_response_payload(request_id, &error),
-        };
-        let mut encoded = serde_json::to_vec(&response)?;
-        encoded.push(b'\n');
-        return transport.write(&encoded).await;
-    }
-
-    if subtype == "hook_callback" {
-        let response = match answer_hook_callback(&request, callbacks).await {
-            Ok(response) => control_success_response_payload(request_id, response),
-            Err(error) => control_error_response_payload(request_id, &error.to_string()),
-        };
-        let mut encoded = serde_json::to_vec(&response)?;
-        encoded.push(b'\n');
-        return transport.write(&encoded).await;
-    }
-
-    let response = control_error_response_payload(
-        request_id,
-        &format!("Unsupported control request subtype: {subtype}"),
-    );
     let mut encoded = serde_json::to_vec(&response)?;
     encoded.push(b'\n');
     transport.write(&encoded).await
 }
 
+/// Build the `control_response` frame for one incoming `control_request`
+/// (Python `Query._handle_control_request`). `None` when the frame carries
+/// no `request_id` to answer.
+pub async fn control_request_response(
+    callbacks: &ControlCallbacks,
+    value: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let request_id = value.get("request_id").and_then(|v| v.as_str())?;
+    let request = value
+        .get("request")
+        .and_then(|request| request.as_object())
+        .cloned()
+        .unwrap_or_default();
+    let subtype = request
+        .get("subtype")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+
+    let result: std::result::Result<serde_json::Value, String> = match subtype {
+        "can_use_tool" => answer_can_use_tool(&request, callbacks)
+            .await
+            .map_err(|error| control_error_text(&error)),
+        "hook_callback" => answer_hook_callback(&request, callbacks)
+            .await
+            .map_err(|error| control_error_text(&error)),
+        "mcp_message" => answer_mcp_control_request(&callbacks.sdk_mcp_servers, &request).await,
+        other => Err(format!("Unsupported control request subtype: {other}")),
+    };
+    Some(match result {
+        Ok(response) => control_success_response_payload(request_id, response),
+        Err(error) => control_error_response_payload(request_id, &error),
+    })
+}
+
+/// The text sent in a control error response: the error's own message
+/// (Python `str(e)`), without the SDK's category prefix.
+pub(crate) fn control_error_text(error: &ClaudeSDKError) -> String {
+    match error {
+        ClaudeSDKError::ControlRequest { message, .. } => message.clone(),
+        ClaudeSDKError::MCP(message)
+        | ClaudeSDKError::Session(message)
+        | ClaudeSDKError::Other(message) => message.clone(),
+        ClaudeSDKError::IO(error) => error.to_string(),
+        ClaudeSDKError::Serialization(error) => error.to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Build the initialize `hooks` config: one entry per event with at least
+/// one matcher (Python skips empty lists), `None` when no event remains.
 fn build_hooks_config(
     options: &ClaudeAgentOptions,
 ) -> (Option<serde_json::Value>, HashMap<String, HookCallback>) {
-    if options.hooks.is_empty() {
-        return (None, HashMap::new());
-    }
-
     let mut callback_index = 0usize;
     let mut hook_callbacks = HashMap::new();
     let mut config = serde_json::Map::new();
@@ -311,6 +374,9 @@ fn build_hooks_config(
         let Some(matchers) = options.hooks.get(&event) else {
             continue;
         };
+        if matchers.is_empty() {
+            continue;
+        }
         let mut matcher_values = Vec::new();
         for matcher in matchers {
             let mut callback_ids = Vec::new();
@@ -318,29 +384,16 @@ fn build_hooks_config(
                 let callback_id = format!("hook_{callback_index}");
                 callback_index += 1;
                 hook_callbacks.insert(callback_id.clone(), callback.clone());
-                callback_ids.push(serde_json::Value::String(callback_id));
+                callback_ids.push(callback_id);
             }
-            let mut matcher_value = serde_json::Map::new();
-            matcher_value.insert(
-                "matcher".to_string(),
-                matcher
-                    .matcher
-                    .clone()
-                    .map(serde_json::Value::String)
-                    .unwrap_or(serde_json::Value::Null),
-            );
-            matcher_value.insert(
-                "hookCallbackIds".to_string(),
-                serde_json::Value::Array(callback_ids),
-            );
-            if let Some(timeout) = matcher.timeout {
-                matcher_value.insert("timeout".to_string(), serde_json::json!(timeout));
-            }
-            matcher_values.push(serde_json::Value::Object(matcher_value));
+            matcher_values.push(hook_matcher_wire_config(matcher, callback_ids));
         }
         config.insert(event, serde_json::Value::Array(matcher_values));
     }
 
+    if config.is_empty() {
+        return (None, hook_callbacks);
+    }
     (Some(serde_json::Value::Object(config)), hook_callbacks)
 }
 
@@ -367,12 +420,18 @@ async fn answer_hook_callback(
     let output = callback
         .call(input, tool_use_id, HookContext::default())
         .await?;
-    Ok(convert_hook_output_for_cli(output))
+    convert_hook_output_for_cli(output)
 }
 
-fn convert_hook_output_for_cli(output: serde_json::Value) -> serde_json::Value {
+/// Rename the Python-safe `async_` / `continue_` keys. A hook must return a
+/// JSON object; anything else is a failed hook (an error response), which a
+/// matcher with `on_failure: "block"` turns into a block.
+fn convert_hook_output_for_cli(output: serde_json::Value) -> Result<serde_json::Value> {
     let serde_json::Value::Object(map) = output else {
-        return output;
+        return Err(ClaudeSDKError::ControlRequest {
+            subtype: "hook_callback".to_string(),
+            message: "hook callback must return a JSON object".to_string(),
+        });
     };
     let mut converted = serde_json::Map::new();
     for (key, value) in map {
@@ -383,21 +442,7 @@ fn convert_hook_output_for_cli(output: serde_json::Value) -> serde_json::Value {
         };
         converted.insert(key, value);
     }
-    serde_json::Value::Object(converted)
-}
-
-pub fn control_success_response_payload(
-    request_id: &str,
-    response: serde_json::Value,
-) -> serde_json::Value {
-    serde_json::json!({
-        "type": "control_response",
-        "response": {
-            "subtype": "success",
-            "request_id": request_id,
-            "response": response,
-        },
-    })
+    Ok(serde_json::Value::Object(converted))
 }
 
 async fn answer_can_use_tool(
@@ -410,8 +455,15 @@ async fn answer_can_use_tool(
             .as_ref()
             .ok_or_else(|| ClaudeSDKError::ControlRequest {
                 subtype: "can_use_tool".to_string(),
-                message: "can_use_tool callback is not provided".to_string(),
+                message: "canUseTool callback is not provided".to_string(),
             })?;
+    let suggestions = permission_suggestions_from_values(
+        request
+            .get("permission_suggestions")
+            .and_then(|v| v.as_array())
+            .map(Vec::as_slice)
+            .unwrap_or_default(),
+    )?;
     let tool_name = request
         .get("tool_name")
         .and_then(|v| v.as_str())
@@ -426,7 +478,7 @@ async fn answer_can_use_tool(
         .cloned()
         .unwrap_or_default();
     let context = ToolPermissionContext {
-        suggestions: permission_suggestions(request),
+        suggestions,
         tool_use_id: string_field(request, "tool_use_id"),
         agent_id: string_field(request, "agent_id"),
         blocked_path: string_field(request, "blocked_path"),
@@ -441,18 +493,6 @@ async fn answer_can_use_tool(
 
 fn string_field(request: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<String> {
     request.get(key).and_then(|v| v.as_str()).map(String::from)
-}
-
-fn permission_suggestions(
-    request: &serde_json::Map<String, serde_json::Value>,
-) -> Vec<PermissionUpdate> {
-    request
-        .get("permission_suggestions")
-        .and_then(|v| v.as_array())
-        .into_iter()
-        .flatten()
-        .filter_map(|value| serde_json::from_value(value.clone()).ok())
-        .collect()
 }
 
 fn permission_result_response(
@@ -473,10 +513,15 @@ fn permission_result_response(
                 "updatedInput".to_string(),
                 serde_json::Value::Object(updated_input.unwrap_or(original_input)),
             );
-            if let Some(updated_permissions) = updated_permissions {
+            // All or nothing: a failed conversion drops every update (and is
+            // logged), but the allow still goes through.
+            if let Some(updates) = updated_permissions
+                .as_deref()
+                .and_then(permission_updates_to_wire)
+            {
                 response.insert(
                     "updatedPermissions".to_string(),
-                    serde_json::to_value(updated_permissions).unwrap_or(serde_json::Value::Null),
+                    serde_json::Value::Array(updates),
                 );
             }
             serde_json::Value::Object(response)
@@ -498,8 +543,7 @@ fn permission_result_response(
 
 #[cfg(test)]
 mod tests {
-    use super::initialize_timeout_from_millis_env_value;
-    use std::time::Duration;
+    use super::*;
 
     #[test]
     fn initialize_timeout_defaults_to_sixty_seconds() {
@@ -522,6 +566,45 @@ mod tests {
         assert_eq!(
             initialize_timeout_from_millis_env_value(Some("1000")),
             Duration::from_secs(60)
+        );
+    }
+
+    #[test]
+    fn request_ids_follow_python_shape() {
+        let id = new_request_id(7);
+        let (prefix, random) = id.rsplit_once('_').unwrap();
+        assert_eq!(prefix, "req_7");
+        assert_eq!(random.len(), 8);
+        assert!(random.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn control_error_text_drops_sdk_prefixes() {
+        assert_eq!(
+            control_error_text(&ClaudeSDKError::ControlRequest {
+                subtype: "hook_callback".into(),
+                message: "No hook callback found for ID: hook_3".into(),
+            }),
+            "No hook callback found for ID: hook_3"
+        );
+        assert_eq!(
+            control_error_text(&ClaudeSDKError::MCP("boom".into())),
+            "boom"
+        );
+        assert_eq!(
+            control_error_text(&CLIConnectionError::new("gone").into()),
+            "gone"
+        );
+    }
+
+    #[test]
+    fn hook_output_must_be_an_object() {
+        assert!(convert_hook_output_for_cli(serde_json::Value::Null).is_err());
+        assert!(convert_hook_output_for_cli(serde_json::json!([1])).is_err());
+        assert_eq!(
+            convert_hook_output_for_cli(serde_json::json!({"async_": true, "continue_": false}))
+                .unwrap(),
+            serde_json::json!({"async": true, "continue": false})
         );
     }
 }

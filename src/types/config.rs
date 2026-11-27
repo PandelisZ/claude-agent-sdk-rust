@@ -367,7 +367,6 @@ impl super::PermissionUpdate {
 /// warning, if any update cannot be converted. The updates are sent all
 /// together or not at all, because the one that failed may be a restriction
 /// the others were meant to come with. An empty slice yields `Some([])`.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn permission_updates_to_wire(
     updates: &[super::PermissionUpdate],
 ) -> Option<Vec<serde_json::Value>> {
@@ -392,7 +391,6 @@ pub(crate) fn permission_updates_to_wire(
 /// [`PermissionUpdate::from_dict`](super::PermissionUpdate::from_dict)
 /// semantics. Upstream raises (and answers the request with an error) when a
 /// suggestion cannot be parsed.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn permission_suggestions_from_values(
     values: &[serde_json::Value],
 ) -> crate::error::Result<Vec<super::PermissionUpdate>> {
@@ -498,7 +496,6 @@ pub fn can_use_tool_shadowed_warning(
 /// Emit the [`CanUseToolShadowedWarning`] via `tracing::warn!`, if any. Call
 /// once per query construction / connect, after the `can_use_tool` /
 /// `permission_prompt_tool_name` mutual-exclusion check.
-#[allow(dead_code)] // wired into client.rs / query.rs entry points separately
 pub(crate) fn warn_if_can_use_tool_shadowed(options: &super::ClaudeAgentOptions) {
     if let Some(warning) = can_use_tool_shadowed_warning(options) {
         tracing::warn!(

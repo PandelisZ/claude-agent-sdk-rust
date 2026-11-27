@@ -25,13 +25,35 @@ const CLOSE_STAGE_TIMEOUT: Duration = Duration::from_secs(5);
 const STDERR_TAIL_LIMIT: usize = 64 * 1024;
 const STDERR_PLACEHOLDER: &str = "Check stderr output for details";
 
+/// The connection to a Claude Code process (Python `Transport`): the
+/// extension point for custom transports.
+///
+/// Once connected, the SDK moves the transport into a background task that
+/// reads and writes concurrently: a pending [`Transport::read`] is dropped
+/// whenever a write, [`Transport::close_input`] or [`Transport::close`] must
+/// run, and `read` is then called again. **`read` must therefore be
+/// cancel-safe**: dropping its future before it completes must not lose a
+/// message (buffer partial data in `self`, as the subprocess transport does).
 #[async_trait]
 pub trait Transport: Send + Sync {
+    /// Start the process / open the connection.
     async fn connect(&mut self) -> Result<()>;
+    /// Write raw bytes (one or more newline-terminated JSON messages).
     async fn write(&mut self, data: &[u8]) -> Result<()>;
+    /// End the input stream (close stdin for process transports); Python
+    /// `end_input()`.
     async fn close_input(&mut self) -> Result<()>;
+    /// The next stdout message as raw JSON bytes, or `None` at end of output.
+    /// Must be cancel-safe (see the trait docs).
     async fn read(&mut self) -> Result<Option<Vec<u8>>>;
+    /// Close the connection and release its resources. Implementations must
+    /// bound their own awaits: the SDK waits for this to return.
     async fn close(&mut self) -> Result<()>;
+    /// Whether the transport is ready for communication (Python
+    /// `is_ready()`).
+    fn is_ready(&self) -> bool {
+        true
+    }
 }
 
 #[derive(Debug)]
@@ -635,6 +657,10 @@ impl Transport for SubprocessCLITransport {
         }
 
         Ok(())
+    }
+
+    fn is_ready(&self) -> bool {
+        self.child.is_some() && self.exit_error.is_none()
     }
 
     async fn close_input(&mut self) -> Result<()> {

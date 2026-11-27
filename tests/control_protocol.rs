@@ -104,6 +104,7 @@ fn initialize_request_includes_agents_dynamic_prompt_and_skill_filter() {
             preset: "claude_code".to_string(),
             append: None,
             exclude_dynamic_sections: Some(true),
+            snapshot: None,
         })
         .skills(Vec::new())
         .agent(
@@ -294,7 +295,7 @@ async fn sdk_mcp_control_request_answers_tools_list() {
         },
     );
     let callbacks = ControlCallbacks {
-        sdk_mcp_servers: HashMap::from([("greeter".to_string(), server)]),
+        sdk_mcp_servers: Arc::new(HashMap::from([("greeter".to_string(), server)])),
         ..ControlCallbacks::default()
     };
     let mut transport = MockTransport::with_reads(vec![serde_json::json!({
@@ -379,5 +380,183 @@ async fn hook_callback_request_invokes_registered_callback() {
     assert_eq!(
         response["response"]["response"]["hookSpecificOutput"]["permissionDecision"],
         "allow"
+    );
+}
+
+#[test]
+fn initialize_request_sends_snapshot_forward_subagent_text_and_on_failure() {
+    let options = claude_code_sdk_rust::ClaudeAgentOptions::builder()
+        .system_prompt_preset(SystemPromptPreset {
+            r#type: "preset".to_string(),
+            preset: "claude_code".to_string(),
+            append: None,
+            exclude_dynamic_sections: Some(false),
+            snapshot: Some(true),
+        })
+        .forward_subagent_text(true)
+        .hook(
+            "PreToolUse",
+            HookMatcher::new(HookCallback::new(|_, _, _| async {
+                Ok(serde_json::json!({}))
+            }))
+            .matcher("Bash")
+            .timeout(5.0)
+            .on_failure("block"),
+        )
+        .build();
+    let callbacks = ControlCallbacks::from_options(&options);
+    assert!(callbacks.hooks_block_on_failure);
+    let request = initialize_request(&callbacks);
+    // Python key order: subtype, hooks, agents?, excludeDynamicSections?,
+    // systemPromptSnapshot?, skills?, forwardSubagentText?.
+    assert_eq!(
+        serde_json::to_string(&request).unwrap(),
+        r#"{"subtype":"initialize","hooks":{"PreToolUse":[{"matcher":"Bash","hookCallbackIds":["hook_0"],"timeout":5.0,"onFailure":"block"}]},"excludeDynamicSections":false,"systemPromptSnapshot":true,"forwardSubagentText":true}"#
+    );
+
+    let custom = claude_code_sdk_rust::ClaudeAgentOptions::builder()
+        .system_prompt_custom(
+            claude_code_sdk_rust::SystemPromptCustom::new("Be brief").with_snapshot(false),
+        )
+        .build();
+    let request = initialize_request(&ControlCallbacks::from_options(&custom));
+    assert_eq!(request["systemPromptSnapshot"], false);
+    assert!(request.get("excludeDynamicSections").is_none());
+    assert!(request.get("forwardSubagentText").is_none());
+}
+
+#[test]
+fn initialize_request_skips_events_without_matchers() {
+    let mut hooks = claude_code_sdk_rust::HookMap::new();
+    hooks.insert("PreToolUse".to_string(), Vec::new());
+    let options = claude_code_sdk_rust::ClaudeAgentOptions::builder()
+        .hooks(hooks.clone())
+        .build();
+    let request = initialize_request(&ControlCallbacks::from_options(&options));
+    assert!(request["hooks"].is_null());
+
+    hooks.insert(
+        "Stop".to_string(),
+        vec![HookMatcher::new(HookCallback::new(|_, _, _| async {
+            Ok(serde_json::json!({}))
+        }))],
+    );
+    let options = claude_code_sdk_rust::ClaudeAgentOptions::builder()
+        .hooks(hooks)
+        .build();
+    let request = initialize_request(&ControlCallbacks::from_options(&options));
+    assert_eq!(
+        request["hooks"],
+        serde_json::json!({"Stop": [{"matcher": null, "hookCallbackIds": ["hook_0"]}]})
+    );
+}
+
+#[tokio::test]
+async fn can_use_tool_permission_updates_use_python_wire_shape() {
+    let callback = claude_code_sdk_rust::CanUseToolCallback::new(|_, _, context| async move {
+        // Suggestions are parsed with PermissionUpdate.from_dict semantics.
+        assert_eq!(context.suggestions.len(), 1);
+        Ok(PermissionResult::Allow {
+            updated_input: None,
+            updated_permissions: Some(context.suggestions),
+        })
+    });
+    let callbacks = ControlCallbacks {
+        can_use_tool: Some(callback),
+        ..ControlCallbacks::default()
+    };
+    let mut transport = MockTransport::with_reads(vec![serde_json::json!({
+        "type": "control_request",
+        "request_id": "permission_1",
+        "request": {
+            "subtype": "can_use_tool",
+            "tool_name": "Bash",
+            "input": {"command": "ls"},
+            "permission_suggestions": [{
+                "type": "addRules",
+                "rules": [{"toolName": "Bash"}],
+                "behavior": "allow"
+            }]
+        }
+    })]);
+    let _ = send_control_request_with_callbacks(
+        &mut transport,
+        serde_json::json!({"subtype": "initialize"}),
+        &callbacks,
+    )
+    .await
+    .unwrap();
+    let response: serde_json::Value =
+        serde_json::from_slice(&transport.state.lock().unwrap().writes[1]).unwrap();
+    assert_eq!(
+        response["response"]["response"]["updatedPermissions"],
+        serde_json::json!([{
+            "type": "addRules",
+            "destination": "session",
+            "rules": [{"toolName": "Bash"}],
+            "behavior": "allow"
+        }])
+    );
+}
+
+#[tokio::test]
+async fn invalid_permission_update_drops_all_updates_but_still_allows() {
+    let callback = claude_code_sdk_rust::CanUseToolCallback::new(|_, _, _| async move {
+        Ok(PermissionResult::Allow {
+            updated_input: None,
+            updated_permissions: Some(vec![claude_code_sdk_rust::PermissionUpdate {
+                r#type: "setMode".to_string(),
+                rules: None,
+                behavior: None,
+                mode: None,
+                directories: None,
+                destination: None,
+            }]),
+        })
+    });
+    let callbacks = ControlCallbacks {
+        can_use_tool: Some(callback),
+        ..ControlCallbacks::default()
+    };
+    let mut transport = MockTransport::with_reads(vec![serde_json::json!({
+        "type": "control_request",
+        "request_id": "permission_1",
+        "request": {"subtype": "can_use_tool", "tool_name": "Bash", "input": {}}
+    })]);
+    let _ = send_control_request_with_callbacks(
+        &mut transport,
+        serde_json::json!({"subtype": "initialize"}),
+        &callbacks,
+    )
+    .await
+    .unwrap();
+    let response: serde_json::Value =
+        serde_json::from_slice(&transport.state.lock().unwrap().writes[1]).unwrap();
+    assert_eq!(
+        response["response"]["response"],
+        serde_json::json!({"behavior": "allow", "updatedInput": {}})
+    );
+}
+
+#[tokio::test]
+async fn mcp_message_without_server_name_is_a_control_error() {
+    let mut transport = MockTransport::with_reads(vec![serde_json::json!({
+        "type": "control_request",
+        "request_id": "mcp_1",
+        "request": {"subtype": "mcp_message", "message": {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}}
+    })]);
+    let _ = send_control_request_with_callbacks(
+        &mut transport,
+        serde_json::json!({"subtype": "initialize"}),
+        &ControlCallbacks::default(),
+    )
+    .await
+    .unwrap();
+    let response: serde_json::Value =
+        serde_json::from_slice(&transport.state.lock().unwrap().writes[1]).unwrap();
+    assert_eq!(response["response"]["subtype"], "error");
+    assert_eq!(
+        response["response"]["error"],
+        "Missing server_name or message for MCP request"
     );
 }

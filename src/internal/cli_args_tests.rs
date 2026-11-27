@@ -542,6 +542,7 @@ fn custom_system_prompt_uses_system_prompt_flag_and_setters_are_exclusive() {
             preset: "claude_code".to_string(),
             append: Some("extra".to_string()),
             exclude_dynamic_sections: Some(true),
+            snapshot: None,
         })
         .build();
     assert_eq!(options.exclude_dynamic_sections(), Some(true));

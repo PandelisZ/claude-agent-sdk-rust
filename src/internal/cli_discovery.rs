@@ -186,14 +186,12 @@ pub(crate) fn claude_version_warnings(
 /// Once-per-session CLI version check, fed from the first `system`/`init`
 /// message on stdout instead of a separate `cli -v` run.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Wired in by the client/query read loop.
 pub(crate) struct ClaudeVersionCheck {
     checked: bool,
     cli_path: String,
     verbatim_prompts: bool,
 }
 
-#[allow(dead_code)] // Wired in by the client/query read loop.
 impl ClaudeVersionCheck {
     pub(crate) fn new(cli_path: impl Into<String>, verbatim_prompts: bool) -> Self {
         Self {

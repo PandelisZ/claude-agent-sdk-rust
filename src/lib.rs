@@ -57,8 +57,16 @@ pub use options::ClaudeAgentOptionsBuilder;
 // Re-export query function and types
 pub use query::{
     query, query_messages, query_messages_with_transport, query_stream_messages,
-    query_stream_messages_with_transport, QueryResult, TokenUsage,
+    query_stream_messages_with_transport, stream_query, stream_query_with_transport, QueryPrompt,
+    QueryResult, TokenUsage,
 };
+
+/// A stream of parsed messages (see [`stream_query`] and
+/// [`ClaudeAgentClient::receive_messages`]).
+pub use internal::runtime::MessageStream;
+
+// The transport extension point (Python exports `Transport` at the root).
+pub use internal::transport::{SubprocessCLITransport, Transport, TransportOptions};
 
 // Re-export client types
 pub use client::ClaudeAgentClient;

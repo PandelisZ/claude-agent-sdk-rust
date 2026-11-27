@@ -14,17 +14,19 @@ fn can_use_tool_rejects_explicit_permission_prompt_tool_name() {
 }
 
 #[tokio::test]
-async fn query_messages_rejects_can_use_tool_with_string_prompt() {
+async fn query_messages_accepts_can_use_tool_with_string_prompt() {
+    // Upstream #1204: a string prompt keeps stdin open for the permission
+    // callback, so the old "requires streaming mode" guard is gone. The
+    // query gets as far as looking for the CLI.
     let options = ClaudeAgentOptions::builder()
         .can_use_tool(|_, _, _| async { Ok(claude_code_sdk_rust::PermissionResult::allow()) })
+        .cli_path("/nonexistent/claude-for-sdk-test")
         .build();
 
     let err = query_messages("hello", Some(options))
         .await
-        .expect_err("string prompt cannot service permission callbacks");
-    assert!(err
-        .to_string()
-        .contains("can_use_tool callback requires streaming mode"));
+        .expect_err("no CLI at that path");
+    assert!(!err.to_string().contains("streaming mode"), "{err}");
 }
 
 #[test]

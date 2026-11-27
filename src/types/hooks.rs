@@ -225,7 +225,6 @@ pub type HookMap = HashMap<String, Vec<HookMatcher>>;
 ///
 /// Mirrors upstream `_internal/query.py` `initialize()`: `timeout` and
 /// `onFailure` are emitted only when set.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn hook_matcher_wire_config(
     matcher: &HookMatcher,
     callback_ids: Vec<String>,
@@ -262,7 +261,6 @@ pub(crate) fn hook_matcher_wire_config(
 
 /// Whether any matcher in `hooks` is set to fail closed. Mirrors upstream's
 /// `blocks_on_failure` accumulator in `initialize()`.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn hooks_block_on_failure(hooks: &HookMap) -> bool {
     hooks.values().flatten().any(HookMatcher::blocks_on_failure)
 }
@@ -296,7 +294,6 @@ fn json_truthy(value: Option<&serde_json::Value>) -> bool {
 /// register the hooks (`hooks_applied` is exactly `false`; a missing key
 /// passes) would make the guard fail open or never run, so this returns a
 /// `CLIConnectionError`.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn check_initialize_response_hook_on_failure(
     blocks_on_failure: bool,
     response: &serde_json::Value,
