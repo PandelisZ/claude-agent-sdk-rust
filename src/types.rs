@@ -5,6 +5,73 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+/// Defines a forward-compatible string enum: known wire values map to unit
+/// variants, anything else is preserved in `Other(String)`. Serializes to the
+/// bare wire string (`#[serde(from = "String", into = "String")]`).
+macro_rules! open_string_enum {
+    (
+        $(#[$meta:meta])*
+        pub enum $name:ident {
+            $(
+                $(#[$vmeta:meta])*
+                $variant:ident => $wire:literal $(| $alias:literal)*
+            ),+ $(,)?
+        }
+    ) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+        #[serde(from = "String", into = "String")]
+        pub enum $name {
+            $(
+                $(#[$vmeta])*
+                $variant,
+            )+
+            /// A value not known at build time (forward-compatible).
+            Other(String),
+        }
+
+        impl $name {
+            /// The wire string for this value.
+            pub fn as_str(&self) -> &str {
+                match self {
+                    $( $name::$variant => $wire, )+
+                    $name::Other(value) => value.as_str(),
+                }
+            }
+        }
+
+        impl From<String> for $name {
+            fn from(value: String) -> Self {
+                match value.as_str() {
+                    $( $wire $(| $alias)* => $name::$variant, )+
+                    _ => $name::Other(value),
+                }
+            }
+        }
+
+        impl From<&str> for $name {
+            fn from(value: &str) -> Self {
+                $name::from(value.to_string())
+            }
+        }
+
+        impl From<$name> for String {
+            fn from(value: $name) -> Self {
+                match value {
+                    $name::Other(value) => value,
+                    other => other.as_str().to_string(),
+                }
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+    };
+}
+
 pub mod messages;
 pub use messages::*;
 pub mod hooks;
@@ -84,39 +151,50 @@ pub enum UserContentKind {
     Blocks,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AssistantMessageErrorKind {
-    AuthenticationFailed,
-    BillingError,
-    RateLimit,
-    InvalidRequest,
-    ServerError,
-    Unknown,
+open_string_enum! {
+    /// Error kind reported on an assistant message (`AssistantMessage.error`).
+    ///
+    /// Mirrors the upstream Python `AssistantMessageError` literal. Unknown
+    /// values sent by newer CLIs are preserved in
+    /// [`AssistantMessageErrorKind::Other`] instead of failing the message.
+    pub enum AssistantMessageErrorKind {
+        AuthenticationFailed => "authentication_failed",
+        BillingError => "billing_error",
+        RateLimit => "rate_limit",
+        InvalidRequest => "invalid_request",
+        ServerError => "server_error",
+        Unknown => "unknown",
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TaskNotificationStatus {
-    Completed,
-    Failed,
-    Stopped,
+/// Python SDK-compatible name for [`AssistantMessageErrorKind`].
+pub type AssistantMessageError = AssistantMessageErrorKind;
+
+open_string_enum! {
+    /// Status of a `task_notification` system message. Unknown values are
+    /// preserved in [`TaskNotificationStatus::Other`].
+    pub enum TaskNotificationStatus {
+        Completed => "completed",
+        Failed => "failed",
+        Stopped => "stopped",
+    }
 }
 
-/// Status values reported inside a `task_updated` patch.
-///
-/// `pending`/`running`/`paused` are non-terminal; `completed`/`failed`/`killed`
-/// are terminal. Note `task_updated` reports the raw `killed`; the CLI maps that
-/// to `stopped` only when it emits a `task_notification`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TaskUpdatedStatus {
-    Pending,
-    Running,
-    Paused,
-    Completed,
-    Failed,
-    Killed,
+open_string_enum! {
+    /// Status values reported inside a `task_updated` patch.
+    ///
+    /// `pending`/`running`/`paused` are non-terminal; `completed`/`failed`/`killed`
+    /// are terminal. Note `task_updated` reports the raw `killed`; the CLI maps that
+    /// to `stopped` only when it emits a `task_notification`. Unknown values are
+    /// preserved in [`TaskUpdatedStatus::Other`].
+    pub enum TaskUpdatedStatus {
+        Pending => "pending",
+        Running => "running",
+        Paused => "paused",
+        Completed => "completed",
+        Failed => "failed",
+        Killed => "killed",
+    }
 }
 
 /// Task statuses that mean the task has finished and should be cleared from any
@@ -132,23 +210,26 @@ pub fn is_terminal_task_status(status: &str) -> bool {
     TERMINAL_TASK_STATUSES.contains(&status)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum RateLimitStatus {
-    Allowed,
-    #[serde(alias = "allowed_warning")]
-    AllowedWarning,
-    Rejected,
+open_string_enum! {
+    /// Rate limit status (`"allowed" | "allowed_warning" | "rejected"`).
+    /// Unknown values are preserved in [`RateLimitStatus::Other`].
+    pub enum RateLimitStatus {
+        Allowed => "allowed",
+        AllowedWarning => "allowed_warning" | "allowedWarning",
+        Rejected => "rejected",
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RateLimitType {
-    FiveHour,
-    SevenDay,
-    SevenDayOpus,
-    SevenDaySonnet,
-    Overage,
+open_string_enum! {
+    /// Which rate limit window applies. Unknown values are preserved in
+    /// [`RateLimitType::Other`].
+    pub enum RateLimitType {
+        FiveHour => "five_hour",
+        SevenDay => "seven_day",
+        SevenDayOpus => "seven_day_opus",
+        SevenDaySonnet => "seven_day_sonnet",
+        Overage => "overage",
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -461,18 +542,30 @@ pub struct ContextUsageResponse {
     pub skills: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+/// Usage statistics reported in `task_progress` and `task_notification`
+/// messages.
+///
+/// Parsed leniently (Python passes the raw dict through): missing counters
+/// default to `0` and unmodelled keys are kept in `extra`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TaskUsage {
-    #[serde(alias = "total_tokens")]
-    pub total_tokens: i32,
-    #[serde(alias = "tool_uses")]
-    pub tool_uses: i32,
-    #[serde(alias = "duration_ms")]
-    pub duration_ms: i32,
+    #[serde(default, alias = "totalTokens")]
+    pub total_tokens: i64,
+    #[serde(default, alias = "toolUses")]
+    pub tool_uses: i64,
+    #[serde(default, alias = "durationMs")]
+    pub duration_ms: i64,
+    /// Keys not modelled above, passed through verbatim.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Rate limit status emitted by the CLI when rate limit state changes.
+///
+/// `raw` always holds the full `rate_limit_info` object as received (it is
+/// populated on deserialization and never serialized), matching Python's
+/// `RateLimitInfo.raw`.
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RateLimitInfo {
     pub status: RateLimitStatus,
@@ -488,8 +581,48 @@ pub struct RateLimitInfo {
     pub overage_resets_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub overage_disabled_reason: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub raw: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Full raw dict from the CLI, including any fields not modelled above.
+    #[serde(skip)]
+    pub raw: serde_json::Map<String, serde_json::Value>,
+}
+
+impl<'de> Deserialize<'de> for RateLimitInfo {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Wire {
+            status: RateLimitStatus,
+            #[serde(default)]
+            resets_at: Option<i64>,
+            #[serde(default)]
+            rate_limit_type: Option<RateLimitType>,
+            #[serde(default)]
+            utilization: Option<f64>,
+            #[serde(default)]
+            overage_status: Option<RateLimitStatus>,
+            #[serde(default)]
+            overage_resets_at: Option<i64>,
+            #[serde(default)]
+            overage_disabled_reason: Option<String>,
+        }
+
+        let raw = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
+        let wire: Wire = serde_json::from_value(serde_json::Value::Object(raw.clone()))
+            .map_err(serde::de::Error::custom)?;
+        Ok(RateLimitInfo {
+            status: wire.status,
+            resets_at: wire.resets_at,
+            rate_limit_type: wire.rate_limit_type,
+            utilization: wire.utilization,
+            overage_status: wire.overage_status,
+            overage_resets_at: wire.overage_resets_at,
+            overage_disabled_reason: wire.overage_disabled_reason,
+            raw,
+        })
+    }
 }
 
 // MCP Server Status Config (tagged enum)

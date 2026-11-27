@@ -408,11 +408,7 @@ impl Transport for SubprocessCLITransport {
                     }
                     return self.finish_read().await;
                 }
-                Ok(n) => self
-                    .stdout_decoder
-                    .push(std::str::from_utf8(&chunk[..n]).map_err(|e| {
-                        CLIConnectionError::new(format!("stdout was not valid UTF-8: {}", e))
-                    })?)?,
+                Ok(n) => self.stdout_decoder.push_bytes(&chunk[..n])?,
                 Err(e) => {
                     return Err(
                         CLIConnectionError::new(format!("failed reading stdout: {}", e)).into(),

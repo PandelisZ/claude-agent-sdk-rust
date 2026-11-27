@@ -44,6 +44,7 @@ pub type McpToolAnnotations = types::MCPToolAnnotations;
 pub type McpToolInfo = types::MCPToolInfo;
 
 // Re-export error types
+pub use error::ResultError;
 pub use error::{
     CLIConnectionError, CLIJSONDecodeError, CLINotFoundError, ClaudeSDKError, MessageParseError,
     ProcessError, Result,
