@@ -234,6 +234,49 @@ fn mcp_status_types_accept_python_wire_shapes() {
 }
 
 #[test]
+fn mcp_status_parsing_is_lenient_like_python() {
+    // Python returns the raw dict; none of these may fail the whole call.
+    let response: MCPStatusResponse = serde_json::from_value(serde_json::json!({
+        "mcpServers": [
+            {"name": "x", "status": "connected", "config": {"command": "foo", "args": ["a"]}},
+            {"name": "ide", "status": "connected", "config": {"type": "ws", "url": "ws://localhost:1"}},
+            {"name": "odd", "status": "connected", "config": {"type": "http"}},
+            {"name": "new", "status": "connecting"}
+        ]
+    }))
+    .unwrap();
+    assert!(matches!(
+        &response.mcp_servers[0].config,
+        Some(MCPServerStatusConfig::Stdio { command: Some(c), .. }) if c == "foo"
+    ));
+    match &response.mcp_servers[1].config {
+        Some(MCPServerStatusConfig::Other(raw)) => {
+            assert_eq!(raw["type"], "ws");
+            assert_eq!(raw["url"], "ws://localhost:1");
+        }
+        other => panic!("expected Other, got {other:?}"),
+    }
+    assert!(matches!(
+        response.mcp_servers[2].config,
+        Some(MCPServerStatusConfig::Other(_))
+    ));
+    assert_eq!(
+        response.mcp_servers[3].status,
+        MCPServerConnectionStatus::Other("connecting".to_string())
+    );
+    assert_eq!(response.mcp_servers[3].status.as_str(), "connecting");
+
+    // Round-trips preserve the raw config and the wire status.
+    let value = serde_json::to_value(&response).unwrap();
+    assert_eq!(value["mcpServers"][1]["config"]["type"], "ws");
+    assert_eq!(value["mcpServers"][3]["status"], "connecting");
+    assert_eq!(value["mcpServers"][0]["config"]["type"], "stdio");
+
+    let empty: MCPStatusResponse = serde_json::from_value(serde_json::json!({})).unwrap();
+    assert!(empty.mcp_servers.is_empty());
+}
+
+#[test]
 fn effort_level_serializes_to_python_literal_strings() {
     // EffortLevel mirrors the upstream Literal["low","medium","high","xhigh","max"].
     for (level, wire) in [

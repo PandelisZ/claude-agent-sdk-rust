@@ -351,15 +351,35 @@ pub(crate) fn build_cli_args(options: &TransportOptions) -> Result<Vec<String>> 
         push_flag(&mut args, "--add-dir", dir.clone());
     }
 
+    // In-process servers always reach the CLI, whichever way the external
+    // servers were given: Python keeps both in one `mcp_servers` value, so
+    // registering one never silently drops the other.
+    let sdk_entries = || {
+        options.sdk_mcp_servers.keys().map(|name| {
+            (
+                name.clone(),
+                crate::types::MCPServerConfig::Sdk { name: name.clone() },
+            )
+        })
+    };
     if let Some(config) = &options.mcp_servers_config {
         if !config.is_empty() {
             push_flag(&mut args, "--mcp-config", config.clone());
         }
-    } else if !options.mcp_servers.is_empty() {
-        let mcp_config = serde_json::json!({
-            "mcpServers": options.mcp_servers
-        });
-        push_flag(&mut args, "--mcp-config", mcp_config.to_string());
+        let sdk_map: std::collections::BTreeMap<_, _> = sdk_entries().collect();
+        if !sdk_map.is_empty() {
+            let mcp_config = serde_json::json!({ "mcpServers": sdk_map });
+            push_flag(&mut args, "--mcp-config", mcp_config.to_string());
+        }
+    } else {
+        let mut merged = options.mcp_servers.clone();
+        for (name, config) in sdk_entries() {
+            merged.entry(name).or_insert(config);
+        }
+        if !merged.is_empty() {
+            let mcp_config = serde_json::json!({ "mcpServers": merged });
+            push_flag(&mut args, "--mcp-config", mcp_config.to_string());
+        }
     }
 
     if options.include_partial_messages {

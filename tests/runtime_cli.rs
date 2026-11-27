@@ -214,3 +214,30 @@ drain_stdin
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(outcome.expect("no pipe deadlock").len(), 401);
 }
+
+/// `query()` fills `QueryResult.usage` from the CLI's real result `usage`
+/// shape, which has no `total_tokens`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn query_result_usage_is_populated_from_cli_result_usage() {
+    let (dir, script) = fake_cli(
+        r#"answer_init
+read -r prompt
+assistant hello
+printf '{"type":"result","subtype":"success","duration_ms":1,"duration_api_ms":1,"is_error":false,"num_turns":1,"session_id":"s","stop_reason":"end_turn","usage":{"input_tokens":12,"cache_creation_input_tokens":100,"cache_read_input_tokens":200,"output_tokens":30,"server_tool_use":{"web_search_requests":0},"service_tier":"standard"}}\n'
+drain_stdin
+"#,
+    );
+    let result = tokio::time::timeout(
+        Duration::from_secs(20),
+        claude_code_sdk_rust::query("hi", Some(options_for(&script).build())),
+    )
+    .await
+    .expect("query finishes")
+    .expect("query succeeds");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(result.content, "hello");
+    let usage = result.usage.expect("usage populated");
+    assert_eq!(usage.input_tokens, 12);
+    assert_eq!(usage.output_tokens, 30);
+    assert_eq!(usage.total_tokens, 42);
+}

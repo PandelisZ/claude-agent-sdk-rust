@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -306,8 +306,21 @@ pub fn project_key_for_directory(directory: Option<&Path>) -> String {
     ))
 }
 
+/// Derive a [`SessionKey`] from a transcript file path.
+///
+/// Main transcripts: `<projects_dir>/<project_key>/<session_id>.jsonl`;
+/// subagent transcripts:
+/// `<projects_dir>/<project_key>/<session_id>/subagents/agent-<id>.jsonl`.
+///
+/// Like Python's `os.path.relpath`, both paths are made absolute (against
+/// the current directory) and normalized lexically (`.` and `..` resolved)
+/// before comparing, so a relative or non-normalized `CLAUDE_CONFIG_DIR`
+/// still matches the CLI's reported paths. Returns `None` when `file_path`
+/// is not under `projects_dir` or has an unrecognized shape.
 pub fn file_path_to_session_key(file_path: &Path, projects_dir: &Path) -> Option<SessionKey> {
-    let relative = file_path.strip_prefix(projects_dir).ok()?;
+    let file_path = lexical_absolute(file_path);
+    let projects_dir = lexical_absolute(projects_dir);
+    let relative = file_path.strip_prefix(&projects_dir).ok()?;
     let parts = normal_components(relative);
     if parts.len() < 2 {
         return None;
@@ -356,6 +369,38 @@ fn next_mtime(last_mtime: i64) -> i64 {
     } else {
         now
     }
+}
+
+/// `os.path.abspath`: join a relative path onto the current directory and
+/// resolve `.` / `..` lexically (no filesystem access, symlinks untouched).
+fn lexical_absolute(path: &Path) -> PathBuf {
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(path),
+            Err(_) => path.to_path_buf(),
+        }
+    };
+    let mut normalized = PathBuf::new();
+    for component in joined.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                // Like normpath, `..` at the root stays at the root.
+                if matches!(
+                    normalized.components().next_back(),
+                    Some(Component::Normal(_))
+                ) {
+                    normalized.pop();
+                } else if !normalized.has_root() {
+                    normalized.push(component);
+                }
+            }
+            other => normalized.push(other),
+        }
+    }
+    normalized
 }
 
 fn normal_components(path: &Path) -> Vec<String> {
@@ -407,6 +452,47 @@ mod tests {
                 session_id: "session-1".to_string(),
                 subpath: Some("subagents/agent-abc".to_string()),
             })
+        );
+    }
+
+    #[test]
+    fn session_keys_tolerate_relative_and_non_normalized_projects_dir() {
+        let expected = Some(SessionKey {
+            project_key: "proj".to_string(),
+            session_id: "session-1".to_string(),
+            subpath: None,
+        });
+        // CLAUDE_CONFIG_DIR="/home/u/proj/../cfg": the CLI reports the
+        // normalized path.
+        assert_eq!(
+            file_path_to_session_key(
+                Path::new("/home/u/cfg/projects/proj/session-1.jsonl"),
+                Path::new("/home/u/proj/../cfg/./projects"),
+            ),
+            expected
+        );
+        // Relative CLAUDE_CONFIG_DIR, absolute reported path.
+        let cwd = std::env::current_dir().unwrap();
+        let absolute = cwd.join(".claude-local/projects/proj/session-1.jsonl");
+        assert_eq!(
+            file_path_to_session_key(&absolute, Path::new(".claude-local/projects")),
+            expected
+        );
+        // Relative on both sides still works.
+        assert_eq!(
+            file_path_to_session_key(
+                Path::new(".claude-local/projects/proj/session-1.jsonl"),
+                Path::new("./.claude-local/projects"),
+            ),
+            expected
+        );
+        // Escaping projects_dir via `..` is rejected.
+        assert_eq!(
+            file_path_to_session_key(
+                Path::new("/home/u/cfg/projects/../other/proj/session-1.jsonl"),
+                Path::new("/home/u/cfg/projects"),
+            ),
+            None
         );
     }
 

@@ -676,3 +676,104 @@ fn verbatim_prompts_stamps_client_composed() {
     assert_eq!(stamped["client_composed"], true);
     assert_eq!(stamped["message"]["content"], "hi");
 }
+
+fn tools_preset() -> crate::types::ToolsPreset {
+    crate::types::ToolsPreset {
+        r#type: "preset".to_string(),
+        preset: "claude_code".to_string(),
+    }
+}
+
+#[test]
+fn tools_and_tools_preset_are_last_write_wins() {
+    let args = args_for(
+        ClaudeAgentOptions::builder()
+            .tools_preset(tools_preset())
+            .tools(vec!["Read".to_string()])
+            .build(),
+    );
+    assert_eq!(flag_value(&args, "--tools"), Some("Read"));
+
+    let args = args_for(
+        ClaudeAgentOptions::builder()
+            .tools(vec!["Read".to_string()])
+            .tools_preset(tools_preset())
+            .build(),
+    );
+    assert_eq!(flag_value(&args, "--tools"), Some("default"));
+    assert_eq!(args.iter().filter(|a| *a == "--tools").count(), 1);
+}
+
+fn mcp_config_values(args: &[String]) -> Vec<String> {
+    args.windows(2)
+        .filter(|window| window[0] == "--mcp-config")
+        .map(|window| window[1].clone())
+        .collect()
+}
+
+fn mcp_server_names(config: &str) -> Vec<String> {
+    let value: serde_json::Value = serde_json::from_str(config).expect("json config");
+    let mut names: Vec<String> = value["mcpServers"]
+        .as_object()
+        .expect("mcpServers")
+        .keys()
+        .cloned()
+        .collect();
+    names.sort();
+    names
+}
+
+fn external_servers() -> std::collections::HashMap<String, crate::types::MCPServerConfig> {
+    let config: crate::types::MCPServerConfig =
+        serde_json::from_value(serde_json::json!({"command": "docs-server"})).expect("config");
+    std::collections::HashMap::from([("docs".to_string(), config)])
+}
+
+#[test]
+fn sdk_mcp_server_survives_later_mcp_servers_map() {
+    let options = ClaudeAgentOptions::builder()
+        .sdk_mcp_server("local", crate::mcp::SimpleMCPServer::new("local"))
+        .mcp_servers(external_servers())
+        .build();
+    let configs = mcp_config_values(&args_for(options));
+    assert_eq!(configs.len(), 1);
+    assert_eq!(mcp_server_names(&configs[0]), vec!["docs", "local"]);
+    let value: serde_json::Value = serde_json::from_str(&configs[0]).unwrap();
+    assert_eq!(value["mcpServers"]["local"]["type"], "sdk");
+}
+
+#[test]
+fn sdk_mcp_server_is_sent_alongside_mcp_servers_config_in_either_order() {
+    for options in [
+        ClaudeAgentOptions::builder()
+            .sdk_mcp_server("local", crate::mcp::SimpleMCPServer::new("local"))
+            .mcp_servers_config("/path/mcp.json")
+            .build(),
+        ClaudeAgentOptions::builder()
+            .mcp_servers_config("/path/mcp.json")
+            .sdk_mcp_server("local", crate::mcp::SimpleMCPServer::new("local"))
+            .build(),
+    ] {
+        let configs = mcp_config_values(&args_for(options));
+        assert_eq!(configs.len(), 2, "{configs:?}");
+        assert_eq!(configs[0], "/path/mcp.json");
+        assert_eq!(mcp_server_names(&configs[1]), vec!["local"]);
+    }
+}
+
+#[test]
+fn external_mcp_server_with_same_name_replaces_sdk_server() {
+    let mut servers = external_servers();
+    let docs = servers.remove("docs").unwrap();
+    let options = ClaudeAgentOptions::builder()
+        .sdk_mcp_server("local", crate::mcp::SimpleMCPServer::new("local"))
+        .mcp_servers(std::collections::HashMap::from([(
+            "local".to_string(),
+            docs,
+        )]))
+        .build();
+    assert!(options.sdk_mcp_servers.is_empty());
+    let configs = mcp_config_values(&args_for(options));
+    let value: serde_json::Value = serde_json::from_str(&configs[0]).unwrap();
+    assert_eq!(value["mcpServers"]["local"]["command"], "docs-server");
+}

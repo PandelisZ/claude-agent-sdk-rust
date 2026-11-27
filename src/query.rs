@@ -25,11 +25,15 @@ use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::sync::Arc;
 
-/// Token usage information from a query response.
+/// Token usage information from a query response, read from the result
+/// message's `usage`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenUsage {
     pub input_tokens: i32,
     pub output_tokens: i32,
+    /// `total_tokens` if the CLI sent one, otherwise
+    /// `input_tokens + output_tokens` (cache token counters are not
+    /// included).
     pub total_tokens: i32,
 }
 
@@ -519,10 +523,14 @@ fn extract_token_usage(
         .get("output_tokens")
         .and_then(|v| v.as_i64())
         .map(|v| v as i32)?;
+    // The CLI's result `usage` follows the Anthropic API shape
+    // (input_tokens, output_tokens, cache_*_input_tokens, ...) and carries
+    // no `total_tokens`; derive it when absent.
     let total_tokens = usage_map
         .get("total_tokens")
         .and_then(|v| v.as_i64())
-        .map(|v| v as i32)?;
+        .map(|v| v as i32)
+        .unwrap_or_else(|| input_tokens.saturating_add(output_tokens));
 
     Some(TokenUsage {
         input_tokens,

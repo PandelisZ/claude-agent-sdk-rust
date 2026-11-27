@@ -12,15 +12,21 @@ impl ClaudeAgentOptionsBuilder {
         Self::default()
     }
 
+    /// Explicit tool list (`--tools a,b`). Replaces any preset set earlier
+    /// (Python's single `tools` field: last assignment wins).
     pub fn tools(mut self, tools: Vec<String>) -> Self {
         self.options.tools = tools;
         self.options.tools_set = true;
+        self.options.tools_preset = None;
         self
     }
 
+    /// Tools preset (`--tools default`). Replaces any explicit list set
+    /// earlier.
     pub fn tools_preset(mut self, preset: ToolsPreset) -> Self {
         self.options.tools_preset = Some(preset);
         self.options.tools_set = false;
+        self.options.tools.clear();
         self
     }
 
@@ -63,8 +69,15 @@ impl ClaudeAgentOptionsBuilder {
         self
     }
 
+    /// Add or replace one external MCP server. Like assigning a key in
+    /// Python's `mcp_servers` dict, this replaces an SDK server of the same
+    /// name.
     pub fn mcp_server(mut self, name: impl Into<String>, config: MCPServerConfig) -> Self {
-        self.options.mcp_servers.insert(name.into(), config);
+        let name = name.into();
+        if !matches!(config, MCPServerConfig::Sdk { .. }) {
+            self.options.sdk_mcp_servers.remove(&name);
+        }
+        self.options.mcp_servers.insert(name, config);
         self
     }
 
@@ -97,14 +110,44 @@ impl ClaudeAgentOptionsBuilder {
         self.sdk_mcp_server(name, wrapped)
     }
 
+    /// Set the external MCP servers. In-process servers registered with
+    /// [`sdk_mcp_server`](Self::sdk_mcp_server) (before or after) are kept
+    /// and merged into the `--mcp-config` map, unless `servers` has an
+    /// external entry with the same name, which replaces it.
     pub fn mcp_servers(mut self, servers: HashMap<String, MCPServerConfig>) -> Self {
+        for (name, config) in &servers {
+            if !matches!(config, MCPServerConfig::Sdk { .. }) {
+                self.options.sdk_mcp_servers.remove(name);
+            }
+        }
+        let sdk_entries: Vec<(String, MCPServerConfig)> = self
+            .options
+            .mcp_servers
+            .drain()
+            .filter(|(name, config)| {
+                matches!(config, MCPServerConfig::Sdk { .. })
+                    && self.options.sdk_mcp_servers.contains_key(name)
+            })
+            .collect();
         self.options.mcp_servers = servers;
+        for (name, config) in sdk_entries {
+            self.options.mcp_servers.entry(name).or_insert(config);
+        }
         self.options.mcp_servers_config = None;
         self
     }
 
+    /// Load external MCP servers from a JSON string or file path
+    /// (`--mcp-config <config>`). Replaces servers set with
+    /// [`mcp_servers`](Self::mcp_servers) / [`mcp_server`](Self::mcp_server);
+    /// in-process servers registered with
+    /// [`sdk_mcp_server`](Self::sdk_mcp_server) are kept and passed in an
+    /// additional `--mcp-config` map.
     pub fn mcp_servers_config(mut self, config: impl Into<String>) -> Self {
-        self.options.mcp_servers.clear();
+        let sdk = &self.options.sdk_mcp_servers;
+        self.options.mcp_servers.retain(|name, config| {
+            matches!(config, MCPServerConfig::Sdk { .. }) && sdk.contains_key(name)
+        });
         self.options.mcp_servers_config = Some(config.into());
         self
     }
