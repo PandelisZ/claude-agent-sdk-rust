@@ -151,6 +151,11 @@ impl ClaudeAgentClient {
     /// timeout or an `on_failure="block"` hook the CLI cannot honor) the
     /// session is torn down before the error is returned. Calling `connect`
     /// on a connected client is a no-op.
+    ///
+    /// Cancel-safe: if the future is dropped before it completes (say, under
+    /// `tokio::time::timeout`), the half-started session is closed in the
+    /// background and the client stays disconnected. A custom transport is
+    /// consumed by that close, so reconnecting then needs a new client.
     pub async fn connect(&mut self) -> Result<()> {
         if self.runtime.is_some() {
             return Ok(());
@@ -167,6 +172,10 @@ impl ClaudeAgentClient {
     async fn connect_inner(&mut self) -> Result<()> {
         let mut options = self.options.clone();
         if !self.custom_transport {
+            // A directory left by a connect that was cancelled midway.
+            if let Some(stale) = self.materialized_resume.take() {
+                stale.cleanup().await;
+            }
             self.materialized_resume = materialize_resume_session(&options).await?;
             if let Some(materialized) = &self.materialized_resume {
                 options = apply_materialized_options(&options, materialized);
@@ -185,11 +194,22 @@ impl ClaudeAgentClient {
         }
 
         let config = RuntimeConfig::from_options(&options, !self.custom_transport);
+        // The runtime is kept local until initialize succeeds: if this future
+        // is dropped while waiting, dropping the runtime closes the session,
+        // instead of leaving a half-initialized runtime that makes the next
+        // `connect()` a no-op and every call fail with "Not connected".
         let (runtime, init) = Runtime::start(transport, config);
-        let runtime = self.runtime.insert(runtime);
-        let response = runtime
+        let response = match runtime
             .finish_initialize(init, initialize_timeout_duration())
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                self.runtime = Some(runtime);
+                return Err(error);
+            }
+        };
+        self.runtime = Some(runtime);
         self.initialization_result = Some(response);
         Ok(())
     }
@@ -569,7 +589,12 @@ impl Drop for ClaudeAgentClient {
                     }
                 });
             }
-            Err(_) => drop(runtime),
+            Err(_) => {
+                drop(runtime);
+                if let Some(materialized) = materialized {
+                    materialized.cleanup_blocking();
+                }
+            }
         }
     }
 }

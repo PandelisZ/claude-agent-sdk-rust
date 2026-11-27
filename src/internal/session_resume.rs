@@ -32,6 +32,37 @@ impl MaterializedResume {
     pub async fn cleanup(&self) {
         let _ = tokio::fs::remove_dir_all(&self.config_dir).await;
     }
+
+    /// [`Self::cleanup`] for callers without a Tokio runtime (a `Drop`).
+    pub fn cleanup_blocking(&self) {
+        let _ = std::fs::remove_dir_all(&self.config_dir);
+    }
+}
+
+/// Removes a half-built resume directory (it may already hold
+/// `.credentials.json`) unless disarmed, including when the future building
+/// it is dropped mid-flight (upstream catches `BaseException`, so
+/// cancellation cleans up too).
+struct TempDirGuard {
+    path: Option<PathBuf>,
+}
+
+impl TempDirGuard {
+    fn path(&self) -> &Path {
+        self.path.as_deref().expect("guard is armed")
+    }
+
+    fn disarm(mut self) -> PathBuf {
+        self.path.take().expect("guard is armed")
+    }
+}
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
 }
 
 pub async fn materialize_resume_session(
@@ -59,27 +90,24 @@ pub async fn materialize_resume_session(
         return Ok(None);
     };
 
-    let config_dir = make_private_temp_dir()?;
-    let result = async {
-        let project_dir = config_dir.join("projects").join(&project_key);
-        tokio::fs::create_dir_all(&project_dir).await?;
-        write_jsonl(&project_dir.join(format!("{session_id}.jsonl")), &entries)?;
+    // From here until it is handed to the caller, the directory is removed
+    // on any exit: an error, a panic, or the future being dropped.
+    let guard = TempDirGuard {
+        path: Some(make_private_temp_dir()?),
+    };
+    let config_dir = guard.path();
+    let project_dir = config_dir.join("projects").join(&project_key);
+    tokio::fs::create_dir_all(&project_dir).await?;
+    write_jsonl(&project_dir.join(format!("{session_id}.jsonl")), &entries)?;
 
-        copy_auth_files(&config_dir, &options.env).await;
+    copy_auth_files(config_dir, &options.env).await;
 
-        if store.supports_list_subkeys() {
-            materialize_subkeys(&store, &project_dir, &project_key, &session_id, timeout).await?;
-        }
-        Ok::<(), ClaudeSDKError>(())
-    }
-    .await;
-    if let Err(error) = result {
-        let _ = tokio::fs::remove_dir_all(&config_dir).await;
-        return Err(error);
+    if store.supports_list_subkeys() {
+        materialize_subkeys(&store, &project_dir, &project_key, &session_id, timeout).await?;
     }
 
     Ok(Some(MaterializedResume {
-        config_dir,
+        config_dir: guard.disarm(),
         resume_session_id: session_id,
     }))
 }

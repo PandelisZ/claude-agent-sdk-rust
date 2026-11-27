@@ -524,7 +524,21 @@ impl Shared {
     {
         futures::pin_mut!(stream);
         let mut written = 0usize;
-        while let Some(message) = stream.next().await {
+        loop {
+            // A panicking prompt stream is the Rust form of upstream's
+            // raising iterator: stop reading it, but still close stdin, or
+            // the CLI would wait for input forever.
+            let message = match AssertUnwindSafe(stream.next()).catch_unwind().await {
+                Ok(Some(message)) => message,
+                Ok(None) => break,
+                Err(panic) => {
+                    tracing::error!(
+                        "Prompt stream failed; closing stdin: prompt stream panicked: {}",
+                        panic_text(&panic).unwrap_or_default()
+                    );
+                    break;
+                }
+            };
             if self.is_closed() {
                 break;
             }
@@ -618,6 +632,17 @@ impl Runtime {
         let (frame_tx, frame_rx) = mpsc::unbounded_channel();
         let (msg_tx, msg_rx) = mpsc::unbounded_channel();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let mut transcript_mirror = transcript_mirror;
+        if let Some(mirror) = &mut transcript_mirror {
+            // The drain task reports straight to the consumer. A weak sender:
+            // the message stream still ends when the router exits.
+            let errors = msg_tx.downgrade();
+            mirror.set_error_sink(Arc::new(move |message| {
+                if let Some(errors) = errors.upgrade() {
+                    let _ = errors.send(StreamItem::Message(message));
+                }
+            }));
+        }
         let blocks_on_failure = callbacks.hooks_block_on_failure;
         let init_request = initialize_request(&callbacks);
         let shared = Arc::new(Shared {
@@ -907,6 +932,13 @@ async fn router_loop(
     messages: mpsc::UnboundedSender<StreamItem>,
     mut state: RouterState,
 ) {
+    // If the router unwinds or is dropped before its teardown below, still
+    // end the run and fail pending requests, so no waiter hangs.
+    let mut teardown = RouterTeardown {
+        shared: &shared,
+        messages: &messages,
+        armed: true,
+    };
     let outcome: Result<()> = loop {
         let event = tokio::select! {
             biased;
@@ -930,7 +962,15 @@ async fn router_loop(
                         .into())
                     }
                 };
-                route_frame(&shared, &mut state, &messages, value).await;
+                let routed = AssertUnwindSafe(route_frame(&shared, &mut state, &messages, value))
+                    .catch_unwind()
+                    .await;
+                if let Err(panic) = routed {
+                    break Err(ClaudeSDKError::Other(format!(
+                        "message router panicked: {}",
+                        panic_text(&panic).unwrap_or_default()
+                    )));
+                }
             }
         }
     };
@@ -938,7 +978,14 @@ async fn router_loop(
     // Python's reader `finally`: flush what the mirror still holds (its
     // errors reach the consumer before any fatal error), end the run for
     // good, and close the message stream.
-    flush_mirror(&mut state, &messages).await;
+    if AssertUnwindSafe(flush_mirror(&mut state))
+        .catch_unwind()
+        .await
+        .is_err()
+    {
+        tracing::error!("transcript mirror final flush panicked");
+    }
+    teardown.armed = false;
     {
         let mut run = lock(&shared.run);
         run.run_final = true;
@@ -959,16 +1006,36 @@ async fn router_loop(
     }
 }
 
-async fn flush_mirror(state: &mut RouterState, messages: &mpsc::UnboundedSender<StreamItem>) {
+/// Wait until everything the mirror holds, including batches already being
+/// drained in the background, has reached the store; its `mirror_error`
+/// messages are queued before this returns.
+async fn flush_mirror(state: &mut RouterState) {
     if let Some(mirror) = &mut state.mirror {
-        match mirror.flush().await {
-            Ok(errors) => {
-                for message in errors {
-                    let _ = messages.send(StreamItem::Message(message));
-                }
-            }
-            Err(error) => tracing::warn!("transcript mirror flush failed: {error}"),
+        mirror.flush().await;
+    }
+}
+
+/// The router's teardown for an exit that skips the normal one (a panic
+/// outside `route_frame`, or the task being dropped).
+struct RouterTeardown<'a> {
+    shared: &'a Shared,
+    messages: &'a mpsc::UnboundedSender<StreamItem>,
+    armed: bool,
+}
+
+impl Drop for RouterTeardown<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
         }
+        {
+            let mut run = lock(&self.shared.run);
+            run.run_final = true;
+            run.end_run();
+        }
+        let error = ClaudeSDKError::Other("message router stopped unexpectedly".to_string());
+        self.shared.fail_pending(Some(&error));
+        let _ = self.messages.send(StreamItem::Fatal(error));
     }
 }
 
@@ -1003,14 +1070,11 @@ async fn route_frame(
             return;
         }
         Some("transcript_mirror") => {
+            // Never waits on the store: a flush it triggers runs in the
+            // mirror's drain task, so routing goes on meanwhile.
             if let Some(mirror) = &mut state.mirror {
-                match mirror.enqueue_value(&value).await {
-                    Ok(errors) => {
-                        for message in errors {
-                            let _ = messages.send(StreamItem::Message(message));
-                        }
-                    }
-                    Err(error) => tracing::warn!("transcript mirror enqueue failed: {error}"),
+                if let Err(error) = mirror.enqueue_value(&value) {
+                    tracing::warn!("transcript mirror enqueue failed: {error}");
                 }
             }
             return;
@@ -1039,7 +1103,7 @@ async fn route_frame(
     if msg_type.as_deref() == Some("result") {
         // Consumers observing the result can rely on the store being up to
         // date for this turn.
-        flush_mirror(state, messages).await;
+        flush_mirror(state).await;
         let mut run = lock(&shared.run);
         run.result_received = true;
         run.turn_in_progress = false;
@@ -1117,12 +1181,15 @@ fn spawn_control_handler(shared: &Arc<Shared>, value: Value) {
 }
 
 fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {
+    panic_text(panic).unwrap_or_else(|| "control request handler panicked".to_string())
+}
+
+/// A panic payload's message, when it is a string.
+fn panic_text(panic: &Box<dyn std::any::Any + Send>) -> Option<String> {
     if let Some(message) = panic.downcast_ref::<&str>() {
-        (*message).to_string()
-    } else if let Some(message) = panic.downcast_ref::<String>() {
-        message.clone()
+        Some((*message).to_string())
     } else {
-        "control request handler panicked".to_string()
+        panic.downcast_ref::<String>().cloned()
     }
 }
 
