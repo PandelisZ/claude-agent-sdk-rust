@@ -66,6 +66,7 @@ pub use client_types::{MessageResponse, StreamEvent};
 pub type ClaudeSDKClient = ClaudeAgentClient;
 
 // Re-export in-process MCP helpers
+pub use mcp::{async_tool, async_tool_with_annotations, SdkMcpServer, SdkMcpToolResult};
 pub use mcp::{
     create_sdk_mcp_server, create_sdk_mcp_server_with_version, initialize_server, tool,
     tool_with_annotations, MCPContent, MCPTool, MCPToolAnnotations, SdkMcpTool, SimpleMCPServer,
