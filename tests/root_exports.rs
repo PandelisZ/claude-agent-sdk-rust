@@ -175,3 +175,9 @@ fn hook_and_permission_types_are_exported_at_crate_root() {
     let _ = std::any::type_name::<sdk::CanUseToolShadowedWarning>();
     let _ = sdk::can_use_tool_shadowed_warning;
 }
+
+#[test]
+fn options_workstream_exports_are_at_crate_root() {
+    let _ = std::mem::size_of::<claude_code_sdk_rust::SystemPromptCustom>();
+    let _ = std::mem::size_of::<claude_code_sdk_rust::SystemPrompt>();
+}
