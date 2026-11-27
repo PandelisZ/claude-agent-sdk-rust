@@ -186,14 +186,11 @@ drain_stdin
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Known gap: the background I/O task cannot read while a write is in
-/// flight (`Transport` takes `&mut self` for both). A CLI that writes more
-/// than a pipe buffer to stdout while the SDK is blocked writing a large
-/// prompt to its stdin then deadlocks; upstream reads and writes from
-/// separate tasks. Fixing it needs the subprocess transport to drain stdout
-/// in its own task.
+/// A CLI that writes more than a pipe buffer to stdout before reading a
+/// prompt larger than the stdin pipe buffer: the subprocess transport queues
+/// stdin writes for its writer task, so the reader keeps draining stdout.
+/// (More cases in `tests/transport_duplex.rs`.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "known gap: stdout is not drained while a large stdin write blocks"]
 async fn large_prompt_write_while_the_cli_floods_stdout_does_not_deadlock() {
     let line = "x".repeat(1000);
     let (dir, script) = fake_cli(&format!(

@@ -7,7 +7,12 @@
 //!   SDK can write (prompts, control responses, control requests) while a
 //!   read is pending. Commands take priority over reading; a pending
 //!   `read()` is dropped when a command arrives, which is why
-//!   [`Transport::read`] must be cancel-safe.
+//!   [`Transport::read`] must be cancel-safe. Nothing is read while a
+//!   command runs, so [`Transport::write`] and [`Transport::close_input`]
+//!   must only queue their work, never wait for the CLI to consume it: a CLI
+//!   blocked writing a full stdout pipe would otherwise never read the stdin
+//!   the SDK is blocked writing. The subprocess transport hands stdin to its
+//!   own writer task, so stdout keeps draining during a large write.
 //! * the **router task** routes every frame: `control_response` frames
 //!   complete the matching pending request, each `control_request` is
 //!   answered in its own task (so a slow hook or tool never stalls the
