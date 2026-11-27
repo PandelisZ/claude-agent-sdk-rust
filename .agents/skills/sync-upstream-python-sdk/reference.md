@@ -28,8 +28,8 @@ What the symbol audit does **not** catch (check the `git log`/diff for these):
 - Python `ThinkingConfig{Adaptive,Enabled,Disabled}` TypedDicts -> one Rust
   `ThinkingConfig` struct discriminated by `ThinkingConfigType`.
 - Python `PermissionResultAllow/Deny` -> `PermissionResult` enum variants.
-- Per-event hook input/output TypedDicts -> currently one generic
-  `HookEventMessage` (see deferred rows in `parity_known.tsv`).
+- Per-event hook input/output TypedDicts -> typed structs in `types/hooks.rs`
+  (`HookInput` enum + `*HookSpecificOutput`); callbacks still use `serde_json::Value`.
 - `__version__` -> `VERSION`; `CanUseTool` -> `CanUseToolCallback`;
   `ToolAnnotations` -> `MCPToolAnnotations`; `SdkPluginConfig` -> `SDKPluginConfig`.
 
@@ -52,6 +52,16 @@ The reference port pattern, end to end:
    `tests/root_exports.rs`.
 Cross-check the Rust parser against `_internal/message_parser.py` for the exact
 field-extraction semantics, not just the type shape.
+
+## Architecture notes (since v0.2.189 sync)
+
+- `internal/runtime.rs` runs a background reader/router: control requests are
+  answered concurrently (one task each), control responses resolve pending
+  oneshots, messages stream to `MessageStream`. Mirrors Python `_internal/query.py`
+  incl. stdin run-end semantics (`has_bidirectional_needs`, session_state idle,
+  deferring task tracking, ceiling).
+- `ErrorResultTracker` (error.rs) replaces a trailing ProcessError with `ResultError`.
+- serde_json `preserve_order` is enabled crate-wide (Python dict order parity).
 
 ## Python module -> Rust module map
 

@@ -30,7 +30,10 @@ PermissionResultAllow	mapped	PermissionResult::Allow
 PermissionResultDeny	mapped	PermissionResult::Deny
 HookContext	mapped	HookContext in types/hooks.rs
 HookCallback	mapped	HookCallback in types/hooks.rs
-HookJSONOutput	mapped	hook output handled as serde_json::Value; typed *HookSpecificOutput structs in hooks.rs
+HookJSONOutput	mapped	typed HookJSONOutput {Sync,Async} enum in types/hooks.rs; callbacks still return serde_json::Value
+
+StreamEvent	mapped	Message::StreamEventMsg (crate-root StreamEvent is the client event enum; name auto-matches but shape differs)
+AssistantMessageError	mapped	type alias of AssistantMessageErrorKind (open enum with Other)
 
 # --- deferred: genuine gaps, represented generically today ---
 # (none - the v0.2.106 hook-input/output, EffortLevel and ServerToolName gaps
