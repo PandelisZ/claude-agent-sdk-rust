@@ -204,8 +204,15 @@ impl SubprocessCLITransport {
             };
             if returncode != 0 {
                 // Let the stderr reader drain what the CLI wrote before exiting.
-                if let Some(task) = self.stderr_task.as_mut() {
-                    let _ = tokio::time::timeout(Duration::from_millis(500), task).await;
+                // Keep the handle only if it is still running: a JoinHandle
+                // must not be polled again after it has completed.
+                if let Some(mut task) = self.stderr_task.take() {
+                    if tokio::time::timeout(Duration::from_millis(500), &mut task)
+                        .await
+                        .is_err()
+                    {
+                        self.stderr_task = Some(task);
+                    }
                 }
                 let stderr = self.stderr.lock().await.clone();
                 let stderr = if stderr.is_empty() {
@@ -1059,6 +1066,30 @@ mod tests {
         assert!(err
             .to_string()
             .contains("ProcessTransport is not ready for writing"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn nonzero_exit_with_stderr_callback_keeps_tail_and_closes_cleanly() {
+        let (dir, script) = fake_cli("printf 'boom\\n' >&2\nexit 4\n");
+        let options = crate::types::ClaudeAgentOptions::builder()
+            .cli_path(script.to_string_lossy().to_string())
+            .stderr(|_line| {})
+            .build();
+        let mut transport = SubprocessCLITransport::new(TransportOptions::from(&options));
+        transport.connect().await.unwrap();
+        match transport.read().await.unwrap_err() {
+            ClaudeSDKError::Process(process) => {
+                assert_eq!(process.exit_code, Some(4));
+                assert_eq!(process.stderr, "boom\n");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        // A second read after the error and close() must not re-poll the
+        // finished stderr task.
+        let _ = transport.read().await;
+        transport.close().await.unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
