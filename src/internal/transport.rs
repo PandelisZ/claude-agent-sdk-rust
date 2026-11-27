@@ -582,6 +582,8 @@ printf '{{"type":"result","subtype":"success","duration_ms":1,"duration_api_ms":
 "#
         )
         .unwrap();
+        file.sync_all().unwrap();
+        drop(file);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
