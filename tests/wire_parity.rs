@@ -998,3 +998,40 @@ fn rate_limit_info_raw_and_forward_compatible_values() {
         "Missing required field in rate_limit_event message: 'status'"
     );
 }
+
+#[test]
+fn task_usage_tolerates_null_float_and_non_object_values() {
+    let progress = parse_message_value(json!({
+        "type": "system", "subtype": "task_progress", "task_id": "t1",
+        "description": "d", "uuid": "u", "session_id": "s",
+        "usage": {"total_tokens": null, "tool_uses": 3.0, "duration_ms": "x"}
+    }))
+    .expect("null/float counters must not fail the message")
+    .expect("a message");
+    match progress {
+        Message::TaskProgressMsg(message) => {
+            assert_eq!(message.usage.total_tokens, 0);
+            assert_eq!(message.usage.tool_uses, 3);
+            assert_eq!(message.usage.duration_ms, 0);
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+
+    let progress = parse_message_value(json!({
+        "type": "system", "subtype": "task_progress", "task_id": "t1",
+        "description": "d", "uuid": "u", "session_id": "s", "usage": null
+    }))
+    .expect("a non-object usage must not fail the message")
+    .expect("a message");
+    assert!(matches!(progress, Message::TaskProgressMsg(_)));
+
+    let err = parse_message_value(json!({
+        "type": "system", "subtype": "task_progress", "task_id": "t1",
+        "description": "d", "uuid": "u", "session_id": "s"
+    }))
+    .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "Missing required field in system message: 'usage'"
+    );
+}

@@ -549,15 +549,46 @@ pub struct ContextUsageResponse {
 /// default to `0` and unmodelled keys are kept in `extra`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TaskUsage {
-    #[serde(default, alias = "totalTokens")]
+    #[serde(default, alias = "totalTokens", deserialize_with = "lenient_counter")]
     pub total_tokens: i64,
-    #[serde(default, alias = "toolUses")]
+    #[serde(default, alias = "toolUses", deserialize_with = "lenient_counter")]
     pub tool_uses: i64,
-    #[serde(default, alias = "durationMs")]
+    #[serde(default, alias = "durationMs", deserialize_with = "lenient_counter")]
     pub duration_ms: i64,
     /// Keys not modelled above, passed through verbatim.
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// A usage counter: integers and integral floats are kept; `null` or any
+/// other shape becomes `0` instead of failing the whole message.
+fn lenient_counter<'de, D>(deserializer: D) -> std::result::Result<i64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(match value {
+        serde_json::Value::Number(number) => number.as_i64().unwrap_or_else(|| {
+            number
+                .as_f64()
+                .filter(|float| float.is_finite() && float.fract() == 0.0)
+                .map(|float| float as i64)
+                .unwrap_or_default()
+        }),
+        _ => 0,
+    })
+}
+
+/// `usage` on a task message: Python keeps the raw value; a non-object
+/// becomes an all-zero [`TaskUsage`] instead of failing the message.
+pub(crate) fn lenient_task_usage<'de, D>(
+    deserializer: D,
+) -> std::result::Result<TaskUsage, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).unwrap_or_default())
 }
 
 /// Rate limit status emitted by the CLI when rate limit state changes.

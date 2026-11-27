@@ -912,6 +912,7 @@ pub struct TaskProgressMessage {
     #[serde(alias = "taskId")]
     pub task_id: String,
     pub description: String,
+    #[serde(deserialize_with = "super::lenient_task_usage")]
     pub usage: TaskUsage,
     pub uuid: String,
     #[serde(alias = "sessionId")]
