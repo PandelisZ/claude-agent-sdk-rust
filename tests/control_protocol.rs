@@ -121,7 +121,7 @@ fn initialize_request_includes_agents_dynamic_prompt_and_skill_filter() {
                 initial_prompt: Some("Start".to_string()),
                 max_turns: Some(3),
                 background: Some(false),
-                effort: Some(serde_json::Value::String("high".to_string())),
+                effort: Some(claude_code_sdk_rust::EffortLevel::High.into()),
                 permission_mode: Some(PermissionMode::Plan),
             },
         )
@@ -505,7 +505,7 @@ async fn invalid_permission_update_drops_all_updates_but_still_allows() {
         Ok(PermissionResult::Allow {
             updated_input: None,
             updated_permissions: Some(vec![claude_code_sdk_rust::PermissionUpdate {
-                r#type: "setMode".to_string(),
+                r#type: "setMode".into(),
                 rules: None,
                 behavior: None,
                 mode: None,

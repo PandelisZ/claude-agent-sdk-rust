@@ -569,7 +569,20 @@ impl Transport for SubprocessCLITransport {
 
         apply_user(&mut cmd, self.options.user.as_deref())?;
 
-        let mut child = match cmd.spawn() {
+        // Retry briefly on ETXTBSY ("Text file busy"): on Linux a concurrent
+        // fork elsewhere in the process can transiently hold a write handle to
+        // a freshly written CLI script, making exec fail until it execs/exits.
+        let mut spawn_result = cmd.spawn();
+        for attempt in 1..=5u64 {
+            match &spawn_result {
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                    tokio::time::sleep(std::time::Duration::from_millis(10 * attempt)).await;
+                    spawn_result = cmd.spawn();
+                }
+                _ => break,
+            }
+        }
+        let mut child = match spawn_result {
             Ok(child) => child,
             Err(e) => {
                 let error: ClaudeSDKError = if e.kind() == std::io::ErrorKind::NotFound {

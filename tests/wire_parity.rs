@@ -1035,3 +1035,106 @@ fn task_usage_tolerates_null_float_and_non_object_values() {
         "Missing required field in system message: 'usage'"
     );
 }
+
+// --- types workstream: argv + initialize wire shapes via a fake CLI ---------
+
+#[cfg(unix)]
+fn fake_cli_recording_argv_and_initialize() -> (std::path::PathBuf, std::path::PathBuf) {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = std::env::temp_dir().join(format!("claude-rust-types-wire-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let script = dir.join("claude");
+    let body = r#"#!/bin/sh
+here="$(dirname "$0")"
+for arg in "$@"; do printf '%s\n' "$arg"; done > "$here/argv.txt"
+IFS= read -r init
+printf '%s\n' "$init" > "$here/init.json"
+rid=$(printf '%s' "$init" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s","response":{}}}\n' "$rid"
+IFS= read -r _user
+printf '%s\n' '{"type":"result","subtype":"success","duration_ms":1,"duration_api_ms":1,"is_error":false,"num_turns":1,"session_id":"s"}'
+"#;
+    let mut file = std::fs::File::create(&script).unwrap();
+    file.write_all(body.as_bytes()).unwrap();
+    file.sync_all().unwrap();
+    // Close the handle before exec to avoid ETXTBSY.
+    drop(file);
+    let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&script, permissions).unwrap();
+    (dir, script)
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn typed_option_literals_reach_argv_and_initialize_like_python() {
+    use claude_code_sdk_rust::{
+        query_messages, AgentDefinition, AgentEffort, ClaudeAgentOptions, EffortLevel,
+        SandboxSettings, SystemPromptPreset, ThinkingConfig, ThinkingDisplay,
+    };
+
+    let (dir, script) = fake_cli_recording_argv_and_initialize();
+    let options = ClaudeAgentOptions::builder()
+        .cli_path(script.to_string_lossy().to_string())
+        .thinking(ThinkingConfig::enabled(2048).with_display(ThinkingDisplay::Summarized))
+        .sandbox(SandboxSettings {
+            enabled: Some(true),
+            ignore_violations: Some(
+                [("*".to_string(), vec!["/etc/hosts".to_string()])]
+                    .into_iter()
+                    .collect(),
+            ),
+            ..Default::default()
+        })
+        .system_prompt_preset(SystemPromptPreset::claude_code().with_exclude_dynamic_sections(true))
+        .agent(
+            "level",
+            AgentDefinition {
+                effort: Some(EffortLevel::Max.into()),
+                ..AgentDefinition::new("Level agent", "p1")
+            },
+        )
+        .agent(
+            "tokens",
+            AgentDefinition {
+                effort: Some(AgentEffort::Tokens(1234)),
+                ..AgentDefinition::new("Token agent", "p2")
+            },
+        )
+        .build();
+
+    let messages = query_messages("hi", Some(options)).await.expect("query");
+    assert!(matches!(messages.last(), Some(Message::ResultMsg { .. })));
+
+    let argv = std::fs::read_to_string(dir.join("argv.txt")).unwrap();
+    let argv: Vec<&str> = argv.lines().collect();
+    let flag = |name: &str| {
+        argv.iter()
+            .position(|a| *a == name)
+            .map(|i| argv[i + 1].to_string())
+    };
+    assert_eq!(flag("--max-thinking-tokens").as_deref(), Some("2048"));
+    assert_eq!(flag("--thinking-display").as_deref(), Some("summarized"));
+    let settings: serde_json::Value =
+        serde_json::from_str(&flag("--settings").expect("--settings")).unwrap();
+    assert_eq!(
+        settings,
+        json!({"sandbox": {"enabled": true, "ignoreViolations": {"*": ["/etc/hosts"]}}})
+    );
+
+    let init: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("init.json")).unwrap()).unwrap();
+    let request = &init["request"];
+    assert_eq!(request["subtype"], "initialize");
+    assert_eq!(request["excludeDynamicSections"], true);
+    assert_eq!(
+        request["agents"],
+        json!({
+            "level": {"description": "Level agent", "prompt": "p1", "effort": "max"},
+            "tokens": {"description": "Token agent", "prompt": "p2", "effort": 1234}
+        })
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

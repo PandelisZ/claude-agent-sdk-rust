@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::{PermissionMode, SettingSource};
+use super::{AgentEffort, PermissionMode, SettingSource};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -40,14 +40,18 @@ pub struct SandboxNetworkConfig {
     pub socks_proxy_port: Option<i32>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SandboxIgnoreViolations {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub file: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub network: Option<Vec<String>>,
-}
+/// Sandbox violations to leave unreported (Python `SandboxIgnoreViolations`,
+/// `dict[str, list[str]]`).
+///
+/// Maps a command pattern to a list of strings. A violation is left
+/// unreported when the command's text contains the pattern and the
+/// violation's text contains one of the strings. The pattern `"*"` matches
+/// every command. Both checks are plain substring matches, not globs.
+///
+/// Example: `{"*": ["/etc/hosts"]}` leaves violations that mention
+/// `/etc/hosts` unreported for every command. This only affects which
+/// violations are reported, not what the sandbox blocks.
+pub type SandboxIgnoreViolations = std::collections::BTreeMap<String, Vec<String>>;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -68,7 +72,9 @@ pub struct SandboxSettings {
     pub enable_weaker_nested_sandbox: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A subagent definition (Python `AgentDefinition`), sent in the initialize
+/// request's `agents` map with `None` fields left out.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentDefinition {
     pub description: String,
@@ -91,10 +97,23 @@ pub struct AgentDefinition {
     pub max_turns: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub background: Option<bool>,
+    /// A named effort level or a token count (Python `EffortLevel | int`).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub effort: Option<serde_json::Value>,
+    pub effort: Option<AgentEffort>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<PermissionMode>,
+}
+
+impl AgentDefinition {
+    /// An agent with `description` and `prompt` and every optional field
+    /// unset.
+    pub fn new(description: impl Into<String>, prompt: impl Into<String>) -> Self {
+        Self {
+            description: description.into(),
+            prompt: prompt.into(),
+            ..Default::default()
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -155,6 +174,24 @@ macro_rules! open_string_enum {
             }
         }
 
+        impl PartialEq<str> for $name {
+            fn eq(&self, other: &str) -> bool {
+                self.as_str() == other
+            }
+        }
+
+        impl PartialEq<&str> for $name {
+            fn eq(&self, other: &&str) -> bool {
+                self.as_str() == *other
+            }
+        }
+
+        impl AsRef<str> for $name {
+            fn as_ref(&self) -> &str {
+                self.as_str()
+            }
+        }
+
         impl Serialize for $name {
             fn serialize<S: serde::Serializer>(
                 &self,
@@ -206,6 +243,89 @@ open_string_enum! {
     }
 }
 
+/// `PermissionUpdate.mode`: a [`PermissionMode`], or a mode this SDK version
+/// does not know, kept verbatim so a suggestion from a newer CLI round-trips
+/// (Python passes the raw string through).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum PermissionUpdateMode {
+    Known(PermissionMode),
+    /// A value this SDK version does not know, kept verbatim.
+    Other(String),
+}
+
+impl PermissionUpdateMode {
+    /// The wire string for this mode.
+    pub fn as_str(&self) -> &str {
+        match self {
+            PermissionUpdateMode::Known(mode) => mode.as_str(),
+            PermissionUpdateMode::Other(value) => value,
+        }
+    }
+
+    /// The typed mode, or `None` when it is unknown.
+    pub fn known(&self) -> Option<PermissionMode> {
+        match self {
+            PermissionUpdateMode::Known(mode) => Some(*mode),
+            PermissionUpdateMode::Other(_) => None,
+        }
+    }
+}
+
+impl From<PermissionMode> for PermissionUpdateMode {
+    fn from(value: PermissionMode) -> Self {
+        PermissionUpdateMode::Known(value)
+    }
+}
+
+impl From<&str> for PermissionUpdateMode {
+    fn from(value: &str) -> Self {
+        match PermissionMode::from_wire(value) {
+            Some(mode) => PermissionUpdateMode::Known(mode),
+            None => PermissionUpdateMode::Other(value.to_string()),
+        }
+    }
+}
+
+impl From<String> for PermissionUpdateMode {
+    fn from(value: String) -> Self {
+        match PermissionMode::from_wire(&value) {
+            Some(mode) => PermissionUpdateMode::Known(mode),
+            None => PermissionUpdateMode::Other(value),
+        }
+    }
+}
+
+impl PartialEq<PermissionMode> for PermissionUpdateMode {
+    fn eq(&self, other: &PermissionMode) -> bool {
+        self.known() == Some(*other)
+    }
+}
+
+impl std::fmt::Display for PermissionUpdateMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl Serialize for PermissionUpdateMode {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for PermissionUpdateMode {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        Ok(PermissionUpdateMode::from(String::deserialize(
+            deserializer,
+        )?))
+    }
+}
+
 impl super::PermissionUpdate {
     /// Convert to the control-protocol dict format, validating it first.
     ///
@@ -229,12 +349,13 @@ impl super::PermissionUpdate {
             "destination".to_string(),
             serde_json::json!(self
                 .destination
-                .as_deref()
+                .as_ref()
+                .map(PermissionUpdateDestination::as_str)
                 .filter(|d| !d.is_empty())
                 .unwrap_or("session")),
         );
 
-        match PermissionUpdateType::from(kind) {
+        match &self.r#type {
             PermissionUpdateType::AddRules
             | PermissionUpdateType::ReplaceRules
             | PermissionUpdateType::RemoveRules => {
@@ -262,7 +383,7 @@ impl super::PermissionUpdate {
                     })
                     .collect();
                 result.insert("rules".to_string(), serde_json::Value::Array(wire_rules));
-                result.insert("behavior".to_string(), serde_json::json!(behavior));
+                result.insert("behavior".to_string(), serde_json::json!(behavior.as_str()));
             }
             PermissionUpdateType::SetMode => {
                 let Some(mode) = &self.mode else {
@@ -272,7 +393,7 @@ impl super::PermissionUpdate {
                             .to_string(),
                     ));
                 };
-                result.insert("mode".to_string(), serde_json::to_value(mode)?);
+                result.insert("mode".to_string(), serde_json::json!(mode.as_str()));
             }
             PermissionUpdateType::AddDirectories | PermissionUpdateType::RemoveDirectories => {
                 let Some(directories) = &self.directories else {
@@ -301,9 +422,8 @@ impl super::PermissionUpdate {
     ///
     /// Lenient like upstream `PermissionUpdate.from_dict`: only `type` (and
     /// `toolName` on each rule) is required; every other field is taken as-is
-    /// and `destination` stays `None` when absent. A `mode` this SDK version
-    /// does not know is dropped to `None` (the field is a typed
-    /// `PermissionMode`).
+    /// and `destination` stays `None` when absent. Unknown `type`, `behavior`,
+    /// `mode` and `destination` strings are kept verbatim (`Other`).
     pub fn from_dict(data: &serde_json::Value) -> crate::error::Result<Self> {
         use crate::error::ClaudeSDKError;
         let kind = data.get("type").and_then(|v| v.as_str()).ok_or_else(|| {
@@ -340,14 +460,12 @@ impl super::PermissionUpdate {
                 ))
             }
         };
-        let string_field = |key: &str| data.get(key).and_then(|v| v.as_str()).map(String::from);
+        let string_field = |key: &str| data.get(key).and_then(|v| v.as_str());
         Ok(Self {
-            r#type: kind.to_string(),
+            r#type: kind.into(),
             rules,
-            behavior: string_field("behavior"),
-            mode: data
-                .get("mode")
-                .and_then(|v| serde_json::from_value(v.clone()).ok()),
+            behavior: string_field("behavior").map(Into::into),
+            mode: string_field("mode").map(Into::into),
             directories: data.get("directories").and_then(|v| {
                 v.as_array().map(|items| {
                     items
@@ -356,7 +474,7 @@ impl super::PermissionUpdate {
                         .collect()
                 })
             }),
-            destination: string_field("destination"),
+            destination: string_field("destination").map(Into::into),
         })
     }
 }
@@ -526,15 +644,11 @@ mod tests {
     #[test]
     fn permission_updates_to_wire_is_all_or_nothing() {
         let good = PermissionUpdate {
-            r#type: "addDirectories".into(),
-            rules: None,
-            behavior: None,
-            mode: None,
             directories: Some(vec!["/a".into()]),
-            destination: None,
+            ..PermissionUpdate::new(PermissionUpdateType::AddDirectories)
         };
         let bad = PermissionUpdate {
-            r#type: "setMode".into(),
+            r#type: PermissionUpdateType::SetMode,
             ..good.clone()
         };
         assert_eq!(
@@ -557,8 +671,16 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed[0].r#type, "setMode");
-        assert!(parsed[0].mode.is_none());
+        assert_eq!(parsed[0].r#type, PermissionUpdateType::SetMode);
+        // Unknown modes pass through like Python, so to_dict still sends them.
+        assert_eq!(
+            parsed[0].mode,
+            Some(PermissionUpdateMode::Other("futureMode".into()))
+        );
+        assert_eq!(
+            parsed[0].to_dict().unwrap(),
+            serde_json::json!({"type": "setMode", "destination": "session", "mode": "futureMode"})
+        );
         assert_eq!(parsed[1].r#type, "futureType");
         assert!(
             permission_suggestions_from_values(&[serde_json::json!({"mode": "plan"})]).is_err()

@@ -274,12 +274,7 @@ impl ClaudeAgentOptions {
     pub fn system_prompt_snapshot(&self) -> Option<bool> {
         match self.active_system_prompt()? {
             SystemPrompt::Custom(custom) => custom.snapshot,
-            // Read through serde so this picks up `SystemPromptPreset.snapshot`
-            // without naming the field here.
-            SystemPrompt::Preset(preset) => serde_json::to_value(&preset)
-                .ok()?
-                .get("snapshot")?
-                .as_bool(),
+            SystemPrompt::Preset(preset) => preset.snapshot,
             _ => None,
         }
     }

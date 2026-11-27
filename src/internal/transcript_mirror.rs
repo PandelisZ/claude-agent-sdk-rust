@@ -216,7 +216,10 @@ pub fn mirror_error_message(key: Option<SessionKey>, error: impl Into<String>) -
         .to_string();
     let mut data = serde_json::Map::new();
     data.insert("type".to_string(), serde_json::json!("system"));
-    data.insert("subtype".to_string(), serde_json::json!("mirror_error"));
+    data.insert(
+        "subtype".to_string(),
+        serde_json::json!(crate::types::MirrorErrorMessage::SUBTYPE),
+    );
     data.insert("error".to_string(), serde_json::json!(error));
     data.insert(
         "key".to_string(),
@@ -449,5 +452,37 @@ mod tests {
         assert_eq!(message.data["key"], serde_json::Value::Null);
         assert_eq!(message.data["session_id"], "");
         assert_eq!(message.error, "boom");
+        assert_eq!(message.subtype(), "mirror_error");
+    }
+
+    #[test]
+    fn mirror_error_data_matches_python_report_mirror_error_shape() {
+        let key = SessionKey {
+            project_key: "proj".to_string(),
+            session_id: "sess".to_string(),
+            subpath: None,
+        };
+        let message = mirror_error_message(Some(key), "boom");
+        let Message::MirrorErrorMsg(mirror) = &message else {
+            panic!("expected mirror error");
+        };
+        // Same keys, in the same order, as Python's report_mirror_error dict.
+        let keys: Vec<&str> = mirror.data.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            ["type", "subtype", "error", "key", "uuid", "session_id"]
+        );
+        assert_eq!(mirror.data["type"], "system");
+        assert_eq!(mirror.data["subtype"], mirror.subtype());
+        assert_eq!(
+            mirror.data["key"],
+            serde_json::json!({"project_key": "proj", "session_id": "sess"})
+        );
+        assert_eq!(mirror.data["session_id"], "sess");
+        assert_eq!(
+            mirror.session_key().map(|k| k.session_id),
+            Some("sess".to_string())
+        );
+        assert_eq!(message.as_system().map(|(s, _)| s), Some("mirror_error"));
     }
 }
