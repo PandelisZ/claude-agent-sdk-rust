@@ -8,6 +8,7 @@
 //! content conversion), notification acks, `notifications/cancelled`, and
 //! refusing a request id that is already in flight.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -521,7 +522,21 @@ pub enum ValidationFailure {
 pub fn validate_arguments(instance: &Value, schema: &Value) -> Result<(), ValidationFailure> {
     check_schema(schema).map_err(ValidationFailure::Schema)?;
     let mut errors = Vec::new();
-    Validator { root: schema }.validate(instance, schema, 0, &mut errors);
+    let validator = Validator {
+        root: schema,
+        nesting: Cell::new(0),
+        overflowed: Cell::new(false),
+    };
+    validator.validate(instance, schema, 0, &mut errors);
+    if validator.overflowed.get() {
+        // A `$ref` cycle that never consumes the instance (e.g. `{"$ref":
+        // "#"}`) would otherwise recurse until the stack overflows and the
+        // process aborts. Python hits RecursionError and reports it as an
+        // error result.
+        return Err(ValidationFailure::Schema(
+            "maximum recursion depth exceeded".to_string(),
+        ));
+    }
     // jsonschema's best_match: the shallowest error, preferring strong
     // (non anyOf/oneOf) ones.
     let best = errors
@@ -625,8 +640,14 @@ struct SchemaError {
     message: String,
 }
 
+/// How deeply `validate` may nest (subschemas, `$ref`s and instance levels
+/// together) before validation gives up.
+const MAX_VALIDATION_NESTING: usize = 128;
+
 struct Validator<'a> {
     root: &'a Value,
+    nesting: Cell<usize>,
+    overflowed: Cell<bool>,
 }
 
 impl<'a> Validator<'a> {
@@ -645,6 +666,25 @@ impl<'a> Validator<'a> {
     }
 
     fn validate(
+        &self,
+        instance: &Value,
+        schema: &Value,
+        depth: usize,
+        errors: &mut Vec<SchemaError>,
+    ) {
+        if self.overflowed.get() {
+            return;
+        }
+        if self.nesting.get() >= MAX_VALIDATION_NESTING {
+            self.overflowed.set(true);
+            return;
+        }
+        self.nesting.set(self.nesting.get() + 1);
+        self.validate_inner(instance, schema, depth, errors);
+        self.nesting.set(self.nesting.get() - 1);
+    }
+
+    fn validate_inner(
         &self,
         instance: &Value,
         schema: &Value,
@@ -1198,6 +1238,45 @@ mod tests {
         let integer = json!({"type": "integer"});
         assert_eq!(validate_arguments(&json!(3.0), &integer), Ok(()));
         assert!(validate_arguments(&json!(true), &json!({"type": "number"})).is_err());
+    }
+
+    #[test]
+    fn ref_cycle_is_a_schema_failure_not_a_stack_overflow() {
+        for schema in [
+            json!({"type": "object", "properties": {}, "$ref": "#"}),
+            json!({"$defs": {"a": {"$ref": "#/$defs/b"}, "b": {"$ref": "#/$defs/a"}}, "$ref": "#/$defs/a"}),
+            json!({"type": "object", "properties": {}, "anyOf": [{"$ref": "#"}]}),
+        ] {
+            assert_eq!(
+                validate_arguments(&json!({}), &schema),
+                Err(ValidationFailure::Schema(
+                    "maximum recursion depth exceeded".to_string()
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn recursive_ref_over_a_finite_instance_still_validates() {
+        let schema = json!({
+            "$defs": {"node": {
+                "type": "object",
+                "properties": {"child": {"$ref": "#/$defs/node"}, "v": {"type": "integer"}},
+            }},
+            "$ref": "#/$defs/node",
+        });
+        let mut tree = json!({"v": 1});
+        for _ in 0..20 {
+            tree = json!({"v": 1, "child": tree});
+        }
+        assert_eq!(validate_arguments(&tree, &schema), Ok(()));
+        tree["child"]["child"]["v"] = json!("x");
+        assert_eq!(
+            validate_arguments(&tree, &schema),
+            Err(ValidationFailure::Instance(
+                "'x' is not of type 'integer'".to_string()
+            ))
+        );
     }
 
     #[test]
