@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 
 use crate::error::{CLIConnectionError, CLINotFoundError, ClaudeSDKError, ProcessError, Result};
@@ -28,20 +28,37 @@ const STDERR_PLACEHOLDER: &str = "Check stderr output for details";
 /// The connection to a Claude Code process (Python `Transport`): the
 /// extension point for custom transports.
 ///
-/// Once connected, the SDK moves the transport into a background task that
-/// reads and writes concurrently: a pending [`Transport::read`] is dropped
-/// whenever a write, [`Transport::close_input`] or [`Transport::close`] must
-/// run, and `read` is then called again. **`read` must therefore be
-/// cancel-safe**: dropping its future before it completes must not lose a
-/// message (buffer partial data in `self`, as the subprocess transport does).
+/// Once connected, the SDK moves the transport into a single background task
+/// that interleaves reads with the writes, input close and close it is asked
+/// for: a pending [`Transport::read`] is dropped whenever a write,
+/// [`Transport::close_input`] or [`Transport::close`] must run, and `read` is
+/// then called again. Two rules follow:
+///
+/// * **`read` must be cancel-safe**: dropping its future before it completes
+///   must not lose a message (buffer partial data in `self`, as the
+///   subprocess transport does).
+/// * **`write` and `close_input` must not wait for the peer to consume the
+///   data.** Nothing is read while they run, so a transport whose writes
+///   apply backpressure (a full pipe, a bounded socket buffer) would deadlock
+///   against a peer that is itself blocked writing output the SDK has not
+///   read yet. Accept the data and return: hand it to a writer task (as
+///   [`SubprocessCLITransport`] does) or buffer it, keeping the order of the
+///   writes, and report a failure that happens later from a subsequent
+///   `write` or `close_input` call.
 #[async_trait]
 pub trait Transport: Send + Sync {
     /// Start the process / open the connection.
     async fn connect(&mut self) -> Result<()>;
     /// Write raw bytes (one or more newline-terminated JSON messages).
+    ///
+    /// Must return once the data is accepted, in order, for delivery, without
+    /// waiting for the peer to read it (see the trait docs). An error means
+    /// the input stream is broken; it may come from an earlier write that
+    /// failed after it returned.
     async fn write(&mut self, data: &[u8]) -> Result<()>;
     /// End the input stream (close stdin for process transports); Python
-    /// `end_input()`.
+    /// `end_input()`. Data already written is still delivered before the end
+    /// of input; like `write`, this must not wait for the peer to read it.
     async fn close_input(&mut self) -> Result<()>;
     /// The next stdout message as raw JSON bytes, or `None` at end of output.
     /// Must be cancel-safe (see the trait docs).
@@ -60,7 +77,13 @@ pub trait Transport: Send + Sync {
 pub struct SubprocessCLITransport {
     options: TransportOptions,
     child: Option<Child>,
-    stdin: Option<ChildStdin>,
+    /// Feeds the stdin writer task; `None` once input is closed or broken.
+    stdin: Option<mpsc::UnboundedSender<Vec<u8>>>,
+    /// Owns `ChildStdin` and writes the queued data in order, so a write
+    /// never stalls the reader on a full pipe.
+    stdin_task: Option<JoinHandle<()>>,
+    /// The writer task's failure, not yet reported by `write`/`close_input`.
+    stdin_error: Arc<std::sync::Mutex<Option<String>>>,
     stdout_reader: Option<BufReader<ChildStdout>>,
     stdout_decoder: StdoutDecoder,
     stderr: Arc<Mutex<String>>,
@@ -192,6 +215,8 @@ impl SubprocessCLITransport {
             options,
             child: None,
             stdin: None,
+            stdin_task: None,
+            stdin_error: Arc::new(std::sync::Mutex::new(None)),
             stdout_reader: None,
             stdout_decoder: StdoutDecoder::new(max_buffer_size),
             stderr: Arc::new(Mutex::new(String::new())),
@@ -218,6 +243,17 @@ impl SubprocessCLITransport {
     fn build_env(&self) -> std::collections::HashMap<String, String> {
         build_process_env(std::env::vars(), &self.options)
     }
+
+    /// Take a failure the stdin writer task hit after its write returned,
+    /// marking the transport broken (as a failed write did when writes were
+    /// synchronous).
+    fn take_stdin_error(&mut self) -> Option<ClaudeSDKError> {
+        let message = lock_std(&self.stdin_error).take()?;
+        self.stdin = None;
+        self.exit_error = Some(message.clone());
+        Some(CLIConnectionError::new(message).into())
+    }
+
     async fn finish_read(&mut self) -> Result<Option<Vec<u8>>> {
         if let Some(ref mut child) = self.child {
             let returncode = match child.wait().await {
@@ -253,6 +289,35 @@ impl SubprocessCLITransport {
         }
         Ok(None)
     }
+}
+
+fn lock_std<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The stdin writer task: write each queued chunk in order, then close stdin
+/// once the queue is closed and drained. A failed write records its error
+/// (reported by the transport's next `write`/`close_input`), closes stdin and
+/// drops whatever is still queued.
+async fn pump_stdin(
+    mut stdin: ChildStdin,
+    mut queue: mpsc::UnboundedReceiver<Vec<u8>>,
+    error: Arc<std::sync::Mutex<Option<String>>>,
+) {
+    while let Some(data) = queue.recv().await {
+        let result = match stdin.write_all(&data).await {
+            Ok(()) => stdin.flush().await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = result {
+            *lock_std(&error) = Some(format!("Failed to write to process stdin: {e}"));
+            return;
+        }
+    }
+    // Closing is best effort, as in the Python SDK's end_input().
+    let _ = stdin.shutdown().await;
 }
 
 /// Python `Popen.returncode`: the exit code, or `-signal` for a child killed
@@ -621,8 +686,15 @@ impl Transport for SubprocessCLITransport {
             )));
         }
 
+        let (stdin_tx, stdin_rx) = mpsc::unbounded_channel();
+        self.stdin_error = Arc::new(std::sync::Mutex::new(None));
+        self.stdin_task = Some(tokio::spawn(pump_stdin(
+            stdin,
+            stdin_rx,
+            self.stdin_error.clone(),
+        )));
         self.child = Some(child);
-        self.stdin = Some(stdin);
+        self.stdin = Some(stdin_tx);
         self.stdout_reader = Some(BufReader::new(stdout));
         self.exit_error = None;
 
@@ -653,33 +725,43 @@ impl Transport for SubprocessCLITransport {
             .into());
         }
 
-        let Some(stdin) = self.stdin.as_mut() else {
+        if let Some(error) = self.take_stdin_error() {
+            return Err(error);
+        }
+
+        // Queue the data for the writer task and return: the stdin pipe may
+        // be full while the CLI is itself blocked writing stdout, and the
+        // reader must keep draining stdout meanwhile.
+        let sent = self
+            .stdin
+            .as_ref()
+            .is_some_and(|stdin| stdin.send(data.to_vec()).is_ok());
+        if !sent {
+            // The writer task stopped: it failed (racing the check above).
+            if let Some(error) = self.take_stdin_error() {
+                return Err(error);
+            }
+            self.stdin = None;
             return Err(
                 CLIConnectionError::new("ProcessTransport is not ready for writing").into(),
             );
-        };
-        let result = match stdin.write_all(data).await {
-            Ok(()) => stdin.flush().await,
-            Err(e) => Err(e),
-        };
-        if let Err(e) = result {
-            self.stdin = None;
-            let message = format!("Failed to write to process stdin: {e}");
-            self.exit_error = Some(message.clone());
-            return Err(CLIConnectionError::new(message).into());
         }
 
         Ok(())
     }
 
     fn is_ready(&self) -> bool {
-        self.child.is_some() && self.exit_error.is_none()
+        self.child.is_some() && self.exit_error.is_none() && lock_std(&self.stdin_error).is_none()
     }
 
     async fn close_input(&mut self) -> Result<()> {
-        if let Some(mut stdin) = self.stdin.take() {
-            // Closing is best effort, as in the Python SDK's end_input().
-            let _ = stdin.shutdown().await;
+        // Closing the queue lets the writer task deliver what is queued and
+        // then close stdin; waiting for that here would stall the reader.
+        let was_open = self.stdin.take().is_some();
+        if was_open {
+            if let Some(error) = self.take_stdin_error() {
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -732,6 +814,17 @@ impl Transport for SubprocessCLITransport {
                     let _ = child.start_kill();
                     let _ = tokio::time::timeout(stage, child.wait()).await;
                 }
+            }
+        }
+
+        if let Some(mut task) = self.stdin_task.take() {
+            // Once the CLI is gone a pending write fails at once; don't wait
+            // on a grandchild that still holds the pipe open.
+            if tokio::time::timeout(Duration::from_millis(500), &mut task)
+                .await
+                .is_err()
+            {
+                task.abort();
             }
         }
 
@@ -1193,6 +1286,119 @@ mod tests {
         let started = std::time::Instant::now();
         transport.close().await.unwrap();
         assert!(started.elapsed() < Duration::from_secs(3));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn writes_return_before_the_cli_reads_and_are_flushed_in_order_before_eof() {
+        // Reads nothing for a while, then copies stdin up to EOF.
+        let (dir, script) = fake_cli("sleep 1\ncat > \"$(dirname \"$0\")/stdin.txt\"\n");
+        let options = crate::types::ClaudeAgentOptions::builder()
+            .cli_path(script.to_string_lossy().to_string())
+            .build();
+        let mut transport = SubprocessCLITransport::new(TransportOptions::from(&options));
+        transport.connect().await.unwrap();
+
+        // Far past the pipe buffer: a synchronous write would block until
+        // the CLI starts reading.
+        let mut big = vec![b'a'; 3 * 1024 * 1024];
+        big.push(b'\n');
+        tokio::time::timeout(Duration::from_millis(500), async {
+            transport.write(&big).await.unwrap();
+            transport.write(b"last\n").await.unwrap();
+            transport.close_input().await.unwrap();
+        })
+        .await
+        .expect("write and close_input only queue");
+        assert!(transport.is_ready());
+
+        assert_eq!(transport.read().await.unwrap(), None);
+        transport.close().await.unwrap();
+        let written = std::fs::read(dir.join("stdin.txt")).unwrap();
+        assert_eq!(written.len(), big.len() + 5);
+        assert!(written.starts_with(&big));
+        assert!(written.ends_with(b"\nlast\n"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Closes its stdin, says so on stdout, and keeps running: writes after
+    /// that fail with EPIPE while the process is alive.
+    const STDIN_CLOSED_CLI: &str = "exec 0<&-\nprintf '{\"type\":\"ready\"}\\n'\nexec sleep 5\n";
+
+    /// Connect, then wait for the CLI to have closed its stdin.
+    async fn connect_stdin_closed(transport: &mut SubprocessCLITransport) {
+        transport.connect().await.unwrap();
+        let ready = transport.read().await.unwrap().expect("ready frame");
+        assert_eq!(ready, br#"{"type":"ready"}"#);
+    }
+
+    /// Wait until the writer task has hit (and recorded) a write error.
+    async fn wait_until_broken(transport: &SubprocessCLITransport) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while transport.is_ready() {
+            assert!(tokio::time::Instant::now() < deadline, "write never failed");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn deferred_write_error_surfaces_on_the_next_write() {
+        // Closes stdin but keeps running, so writes fail with EPIPE.
+        let (dir, script) = fake_cli(STDIN_CLOSED_CLI);
+        let options = crate::types::ClaudeAgentOptions::builder()
+            .cli_path(script.to_string_lossy().to_string())
+            .build();
+        let mut transport = SubprocessCLITransport::new(TransportOptions::from(&options));
+        transport.set_close_stage_timeout(Duration::from_millis(200));
+        connect_stdin_closed(&mut transport).await;
+
+        transport.write(b"{}\n").await.unwrap();
+        wait_until_broken(&transport).await;
+        let err = transport.write(b"{}\n").await.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Failed to write to process stdin: Broken pipe"),
+            "{err}"
+        );
+        let err = transport.write(b"{}\n").await.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("ProcessTransport is not ready for writing"),
+            "{err}"
+        );
+        // Already reported: ending input is quiet.
+        transport.close_input().await.unwrap();
+        transport.close().await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn deferred_write_error_surfaces_on_close_input() {
+        let (dir, script) = fake_cli(STDIN_CLOSED_CLI);
+        let options = crate::types::ClaudeAgentOptions::builder()
+            .cli_path(script.to_string_lossy().to_string())
+            .build();
+        let mut transport = SubprocessCLITransport::new(TransportOptions::from(&options));
+        transport.set_close_stage_timeout(Duration::from_millis(200));
+        connect_stdin_closed(&mut transport).await;
+
+        transport.write(b"{}\n").await.unwrap();
+        wait_until_broken(&transport).await;
+        let err = transport.close_input().await.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Failed to write to process stdin: Broken pipe"),
+            "{err}"
+        );
+        transport.close_input().await.unwrap();
+        let err = transport.write(b"{}\n").await.unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("ProcessTransport is not ready for writing"));
+        transport.close().await.unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
