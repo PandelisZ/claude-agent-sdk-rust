@@ -372,7 +372,7 @@ async fn tools_list_emits_only_set_hints_and_keeps_registration_order() {
             "inputSchema": {
                 "type": "object",
                 "properties": {"x": {"type": "string"}, "n": {"type": "integer"}},
-                "required": ["n", "x"],
+                "required": ["x", "n"],
             },
         })
     );

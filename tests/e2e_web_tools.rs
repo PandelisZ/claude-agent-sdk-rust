@@ -159,8 +159,15 @@ async fn real_claude_cli_uses_web_search_tool() {
         eprintln!("skipping: web tool unavailable: {:?}", cap.errors);
         return;
     }
-    assert!(cap.errors.is_empty(), "unexpected stream errors: {:?}", cap.errors);
-    assert!(cap.saw_complete, "stream ended without a Complete/TurnComplete event");
+    assert!(
+        cap.errors.is_empty(),
+        "unexpected stream errors: {:?}",
+        cap.errors
+    );
+    assert!(
+        cap.saw_complete,
+        "stream ended without a Complete/TurnComplete event"
+    );
 
     // If the model never invoked the tool and instead reported it can't reach
     // the web, treat that as an environment skip rather than a hard failure.
@@ -208,8 +215,15 @@ async fn real_claude_cli_uses_web_fetch_tool() {
         eprintln!("skipping: web tool unavailable: {:?}", cap.errors);
         return;
     }
-    assert!(cap.errors.is_empty(), "unexpected stream errors: {:?}", cap.errors);
-    assert!(cap.saw_complete, "stream ended without a Complete/TurnComplete event");
+    assert!(
+        cap.errors.is_empty(),
+        "unexpected stream errors: {:?}",
+        cap.errors
+    );
+    assert!(
+        cap.saw_complete,
+        "stream ended without a Complete/TurnComplete event"
+    );
 
     if !cap.used_tool("webfetch") && !cap.used_tool("web_fetch") {
         if looks_web_unavailable(&cap.content) {

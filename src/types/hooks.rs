@@ -935,6 +935,7 @@ pub struct SyncHookJSONOutput {
 /// with `.into()` (or [`HookJSONOutput::to_value`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
+#[allow(clippy::large_enum_variant)]
 pub enum HookJSONOutput {
     Async(AsyncHookJSONOutput),
     Sync(SyncHookJSONOutput),

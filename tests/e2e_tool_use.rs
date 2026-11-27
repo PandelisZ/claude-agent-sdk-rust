@@ -114,9 +114,7 @@ struct Captured {
     saw_complete: bool,
 }
 
-async fn drain_stream(
-    mut events: tokio::sync::mpsc::UnboundedReceiver<StreamEvent>,
-) -> Captured {
+async fn drain_stream(mut events: tokio::sync::mpsc::UnboundedReceiver<StreamEvent>) -> Captured {
     let mut cap = Captured {
         content: String::new(),
         tool_starts: Vec::new(),
@@ -164,8 +162,15 @@ async fn real_claude_cli_invokes_sdk_mcp_tool() {
         eprintln!("skipping: model unavailable: {:?}", cap.errors);
         return;
     }
-    assert!(cap.errors.is_empty(), "unexpected stream errors: {:?}", cap.errors);
-    assert!(cap.saw_complete, "stream ended without a Complete/TurnComplete event");
+    assert!(
+        cap.errors.is_empty(),
+        "unexpected stream errors: {:?}",
+        cap.errors
+    );
+    assert!(
+        cap.saw_complete,
+        "stream ended without a Complete/TurnComplete event"
+    );
 
     // Strongest signal: the Rust handler actually executed (>= 1; the model
     // may legitimately call the tool more than once).
@@ -234,7 +239,11 @@ async fn real_claude_cli_executes_builtin_bash_tool() {
         eprintln!("skipping: model unavailable: {:?}", cap.errors);
         return;
     }
-    assert!(cap.errors.is_empty(), "unexpected stream errors: {:?}", cap.errors);
+    assert!(
+        cap.errors.is_empty(),
+        "unexpected stream errors: {:?}",
+        cap.errors
+    );
 
     // The Bash invocation should surface as a ToolUseStart stream event.
     assert!(
@@ -288,7 +297,11 @@ async fn real_claude_cli_reports_sdk_mcp_server_status() {
     }
 
     // If the in-process server is reported, validate its shape; otherwise note it.
-    match status.mcp_servers.iter().find(|server| server.name == "roder") {
+    match status
+        .mcp_servers
+        .iter()
+        .find(|server| server.name == "roder")
+    {
         Some(roder) => {
             assert!(
                 matches!(roder.status, MCPServerConnectionStatus::Connected),
@@ -305,7 +318,11 @@ async fn real_claude_cli_reports_sdk_mcp_server_status() {
         }
         None => eprintln!(
             "note: in-process 'roder' server not listed in mcp_status; reported servers: {:?}",
-            status.mcp_servers.iter().map(|s| &s.name).collect::<Vec<_>>()
+            status
+                .mcp_servers
+                .iter()
+                .map(|s| &s.name)
+                .collect::<Vec<_>>()
         ),
     }
 

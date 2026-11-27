@@ -140,7 +140,9 @@ async fn real_claude_cli_fable_5_streaming_smoke() {
     // The AssistantMsg-derived Complete carries the model; ResultMsg-derived
     // Completes have an empty model. At least one must identify Fable.
     assert!(
-        completes.iter().any(|response| response.model.contains("fable")),
+        completes
+            .iter()
+            .any(|response| response.model.contains("fable")),
         "expected a Complete event with a Fable model, got {:?}",
         completes
             .iter()

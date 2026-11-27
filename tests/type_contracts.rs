@@ -243,14 +243,19 @@ fn effort_level_serializes_to_python_literal_strings() {
         (EffortLevel::Xhigh, "xhigh"),
         (EffortLevel::Max, "max"),
     ] {
-        assert_eq!(serde_json::to_value(level).unwrap(), serde_json::json!(wire));
+        assert_eq!(
+            serde_json::to_value(level).unwrap(),
+            serde_json::json!(wire)
+        );
         assert_eq!(level.as_cli(), wire);
         let parsed: EffortLevel = serde_json::from_value(serde_json::json!(wire)).unwrap();
         assert_eq!(parsed, level);
     }
 
     // The builder stores the typed effort on the options.
-    let options = ClaudeAgentOptions::builder().effort(EffortLevel::Xhigh).build();
+    let options = ClaudeAgentOptions::builder()
+        .effort(EffortLevel::Xhigh)
+        .build();
     assert_eq!(options.effort, Some(EffortLevel::Xhigh));
 }
 
@@ -259,12 +264,14 @@ fn server_tool_name_round_trips_and_is_forward_compatible() {
     // Known names map to typed variants on the wire.
     let known: ServerToolName = serde_json::from_value(serde_json::json!("web_search")).unwrap();
     assert_eq!(known, ServerToolName::WebSearch);
-    assert_eq!(serde_json::to_value(&known).unwrap(), serde_json::json!("web_search"));
+    assert_eq!(
+        serde_json::to_value(&known).unwrap(),
+        serde_json::json!("web_search")
+    );
     assert_eq!(known.as_str(), "web_search");
 
     // Unknown names are preserved (forward-compatible) rather than failing.
-    let unknown: ServerToolName =
-        serde_json::from_value(serde_json::json!("future_tool")).unwrap();
+    let unknown: ServerToolName = serde_json::from_value(serde_json::json!("future_tool")).unwrap();
     assert_eq!(unknown, ServerToolName::Other("future_tool".to_string()));
     assert_eq!(
         serde_json::to_value(&unknown).unwrap(),
