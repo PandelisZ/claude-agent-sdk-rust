@@ -104,6 +104,7 @@ fn initialize_request_includes_agents_dynamic_prompt_and_skill_filter() {
             preset: "claude_code".to_string(),
             append: None,
             exclude_dynamic_sections: Some(true),
+            snapshot: None,
         })
         .skills(Vec::new())
         .agent(
@@ -120,7 +121,7 @@ fn initialize_request_includes_agents_dynamic_prompt_and_skill_filter() {
                 initial_prompt: Some("Start".to_string()),
                 max_turns: Some(3),
                 background: Some(false),
-                effort: Some(serde_json::Value::String("high".to_string())),
+                effort: Some(claude_code_sdk_rust::EffortLevel::High.into()),
                 permission_mode: Some(PermissionMode::Plan),
             },
         )

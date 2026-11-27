@@ -1021,6 +1021,16 @@ pub struct MirrorErrorMessage {
 }
 
 impl MirrorErrorMessage {
+    /// The system-message subtype of every mirror error.
+    pub const SUBTYPE: &'static str = "mirror_error";
+
+    /// The base `SystemMessage.subtype` (always `"mirror_error"`), as on the
+    /// Python `SystemMessage` subclass. `data` carries the raw payload,
+    /// including `type` and `subtype`.
+    pub fn subtype(&self) -> &str {
+        Self::SUBTYPE
+    }
+
     /// The typed session key of the failed append (Python
     /// `MirrorErrorMessage.key: SessionKey | None`). `None` when absent or
     /// malformed.

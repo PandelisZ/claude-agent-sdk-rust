@@ -202,3 +202,12 @@ fn sdk_mcp_async_exports_are_present() {
         |_| async { claude_code_sdk_rust::SdkMcpToolResult::text("ok") },
     );
 }
+
+#[test]
+fn types_workstream_exports_are_at_crate_root() {
+    let _ = std::mem::size_of::<claude_code_sdk_rust::ThinkingDisplay>();
+    let _ = std::mem::size_of::<claude_code_sdk_rust::AgentEffort>();
+    let _ = std::mem::size_of::<claude_code_sdk_rust::PermissionUpdateMode>();
+    let _ = std::mem::size_of::<claude_code_sdk_rust::SandboxIgnoreViolations>();
+    let _ = claude_code_sdk_rust::MirrorErrorMessage::SUBTYPE;
+}

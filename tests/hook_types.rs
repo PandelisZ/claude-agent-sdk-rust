@@ -402,7 +402,7 @@ fn hook_json_output_uses_cli_keys() {
 
 fn update(kind: &str) -> PermissionUpdate {
     PermissionUpdate {
-        r#type: kind.to_string(),
+        r#type: kind.into(),
         rules: None,
         behavior: None,
         mode: None,
@@ -426,7 +426,7 @@ fn permission_update_to_dict_matches_python() {
         ]),
         behavior: Some("allow".into()),
         // Fields the type does not use are left out.
-        mode: Some(PermissionMode::Plan),
+        mode: Some(PermissionMode::Plan.into()),
         directories: Some(vec!["/x".into()]),
         ..update("addRules")
     };
@@ -441,7 +441,7 @@ fn permission_update_to_dict_matches_python() {
     );
 
     let mode = PermissionUpdate {
-        mode: Some(PermissionMode::AcceptEdits),
+        mode: Some(PermissionMode::AcceptEdits.into()),
         destination: Some("localSettings".into()),
         behavior: Some("deny".into()),
         ..update("setMode")
@@ -502,7 +502,7 @@ fn permission_update_from_dict_is_lenient_inverse() {
     .unwrap();
     assert_eq!(parsed.r#type, "addRules");
     assert!(parsed.destination.is_none());
-    assert_eq!(parsed.behavior.as_deref(), Some("ask"));
+    assert_eq!(parsed.behavior.as_ref().map(|b| b.as_str()), Some("ask"));
     let rules = parsed.rules.as_ref().unwrap();
     assert_eq!(rules[1].tool_name, "Read");
     assert!(rules[1].rule_content.is_none());
@@ -522,8 +522,11 @@ fn permission_update_from_dict_is_lenient_inverse() {
     }))
     .unwrap();
     assert_eq!(future.r#type, "addHosts");
-    assert_eq!(future.behavior.as_deref(), Some("maybe"));
-    assert_eq!(future.destination.as_deref(), Some("cloudSettings"));
+    assert_eq!(future.behavior.as_ref().map(|b| b.as_str()), Some("maybe"));
+    assert_eq!(
+        future.destination.as_ref().map(|d| d.as_str()),
+        Some("cloudSettings")
+    );
 
     assert!(PermissionUpdate::from_dict(&json!({"behavior": "allow"})).is_err());
 }
@@ -562,11 +565,11 @@ fn permission_enums_round_trip_with_other_fallback() {
         assert_eq!(String::from(kind), wire);
     }
 
-    // The enums plug into the string-typed PermissionUpdate fields.
+    // The enums are the PermissionUpdate field types.
     let typed = PermissionUpdate {
-        behavior: Some(PermissionBehavior::Deny.into()),
+        behavior: Some(PermissionBehavior::Deny),
         rules: Some(vec![]),
-        destination: Some(PermissionUpdateDestination::ProjectSettings.into()),
+        destination: Some(PermissionUpdateDestination::ProjectSettings),
         ..update(PermissionUpdateType::AddRules.as_str())
     };
     assert_eq!(

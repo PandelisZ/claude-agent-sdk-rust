@@ -83,7 +83,7 @@ pub use agent_options::*;
 
 // Enums and String Constants
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PermissionMode {
     Default,
@@ -92,6 +92,33 @@ pub enum PermissionMode {
     BypassPermissions,
     DontAsk,
     Auto,
+}
+
+impl PermissionMode {
+    /// The wire string for this mode (`"default"`, `"acceptEdits"`, ...).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PermissionMode::Default => "default",
+            PermissionMode::AcceptEdits => "acceptEdits",
+            PermissionMode::Plan => "plan",
+            PermissionMode::BypassPermissions => "bypassPermissions",
+            PermissionMode::DontAsk => "dontAsk",
+            PermissionMode::Auto => "auto",
+        }
+    }
+
+    /// Parse a wire string; `None` for a mode this SDK version does not know.
+    pub fn from_wire(value: &str) -> Option<Self> {
+        Some(match value {
+            "default" => PermissionMode::Default,
+            "acceptEdits" => PermissionMode::AcceptEdits,
+            "plan" => PermissionMode::Plan,
+            "bypassPermissions" => PermissionMode::BypassPermissions,
+            "dontAsk" => PermissionMode::DontAsk,
+            "auto" => PermissionMode::Auto,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,6 +141,25 @@ pub enum ThinkingConfigType {
     Adaptive,
     Enabled,
     Disabled,
+}
+
+/// How thinking content is returned (Python `ThinkingDisplay`,
+/// `"summarized" | "omitted"`). Sent as `--thinking-display`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThinkingDisplay {
+    Summarized,
+    Omitted,
+}
+
+impl ThinkingDisplay {
+    /// The bare string passed to `--thinking-display`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ThinkingDisplay::Summarized => "summarized",
+            ThinkingDisplay::Omitted => "omitted",
+        }
+    }
 }
 
 /// Controls how much effort Claude puts into its response.
@@ -141,6 +187,33 @@ impl EffortLevel {
             EffortLevel::Xhigh => "xhigh",
             EffortLevel::Max => "max",
         }
+    }
+}
+
+/// `AgentDefinition.effort` (Python `EffortLevel | int`): a named effort
+/// level or an explicit token count. Serializes to the bare string or number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AgentEffort {
+    Level(EffortLevel),
+    Tokens(i64),
+}
+
+impl From<EffortLevel> for AgentEffort {
+    fn from(value: EffortLevel) -> Self {
+        AgentEffort::Level(value)
+    }
+}
+
+impl From<i64> for AgentEffort {
+    fn from(value: i64) -> Self {
+        AgentEffort::Tokens(value)
+    }
+}
+
+impl From<i32> for AgentEffort {
+    fn from(value: i32) -> Self {
+        AgentEffort::Tokens(value.into())
     }
 }
 
@@ -245,8 +318,14 @@ pub enum MCPServerConnectionStatus {
 
 // MCP Server Config Types (tagged enum pattern)
 
+/// An external MCP server (Python `McpServerConfig` minus the in-process
+/// `sdk` instance, which lives in `ClaudeAgentOptions::sdk_mcp_servers`).
+///
+/// Like Python's `McpStdioServerConfig`, `type` is optional for stdio
+/// servers on input: `{"command": "..."}` deserializes as [`Self::Stdio`].
+/// Serialization always writes `type`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(remote = "Self", tag = "type", rename_all = "camelCase")]
 pub enum MCPServerConfig {
     #[serde(rename = "stdio")]
     Stdio {
@@ -270,6 +349,29 @@ pub enum MCPServerConfig {
     Sdk { name: String },
 }
 
+impl Serialize for MCPServerConfig {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        MCPServerConfig::serialize(self, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for MCPServerConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let mut value = serde_json::Value::deserialize(deserializer)?;
+        if let serde_json::Value::Object(map) = &mut value {
+            if !map.contains_key("type") {
+                map.insert("type".to_string(), serde_json::json!("stdio"));
+            }
+        }
+        MCPServerConfig::deserialize(value).map_err(serde::de::Error::custom)
+    }
+}
+
 // Simple Struct Types
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -279,15 +381,67 @@ pub struct ToolsPreset {
     pub preset: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+/// System prompt preset configuration (Python `SystemPromptPreset`).
+///
+/// Serde keys match the Python TypedDict (`exclude_dynamic_sections`, snake
+/// case); the camelCase `excludeDynamicSections` is also accepted on input.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SystemPromptPreset {
+    /// Always `"preset"`.
     pub r#type: String,
+    /// Always `"claude_code"`.
     pub preset: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub append: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Strip per-user dynamic sections (working directory, auto-memory, git
+    /// status) so the prompt stays cacheable across users. Sent as the
+    /// initialize request's `excludeDynamicSections`.
+    #[serde(
+        default,
+        alias = "excludeDynamicSections",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub exclude_dynamic_sections: Option<bool>,
+    /// Whether the session keeps the system prompt it recorded on its first
+    /// request (`None` acts as `true`, except in bare mode). Sent as the
+    /// initialize request's `systemPromptSnapshot`. Requires Claude Code
+    /// 2.1.257+.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<bool>,
+}
+
+impl SystemPromptPreset {
+    /// The `claude_code` preset with no options set.
+    pub fn claude_code() -> Self {
+        Self {
+            r#type: "preset".to_string(),
+            preset: "claude_code".to_string(),
+            append: None,
+            exclude_dynamic_sections: None,
+            snapshot: None,
+        }
+    }
+
+    pub fn with_append(mut self, append: impl Into<String>) -> Self {
+        self.append = Some(append.into());
+        self
+    }
+
+    pub fn with_exclude_dynamic_sections(mut self, exclude: bool) -> Self {
+        self.exclude_dynamic_sections = Some(exclude);
+        self
+    }
+
+    pub fn with_snapshot(mut self, snapshot: bool) -> Self {
+        self.snapshot = Some(snapshot);
+        self
+    }
+}
+
+impl Default for SystemPromptPreset {
+    fn default() -> Self {
+        Self::claude_code()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -297,14 +451,59 @@ pub struct SystemPromptFile {
     pub path: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+/// Extended thinking configuration (the Python `ThinkingConfigAdaptive |
+/// ThinkingConfigEnabled | ThinkingConfigDisabled` union, discriminated by
+/// `type`).
+///
+/// Serde keys match the Python TypedDicts (`budget_tokens`, snake case); the
+/// camelCase `budgetTokens` is also accepted on input.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ThinkingConfig {
     pub r#type: ThinkingConfigType,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Required by `enabled` (sent as `--max-thinking-tokens`).
+    #[serde(
+        default,
+        alias = "budgetTokens",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub budget_tokens: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub display: Option<String>,
+    /// Ignored for `disabled`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<ThinkingDisplay>,
+}
+
+impl ThinkingConfig {
+    /// `{"type": "adaptive"}`.
+    pub fn adaptive() -> Self {
+        Self {
+            r#type: ThinkingConfigType::Adaptive,
+            budget_tokens: None,
+            display: None,
+        }
+    }
+
+    /// `{"type": "enabled", "budget_tokens": budget_tokens}`.
+    pub fn enabled(budget_tokens: i32) -> Self {
+        Self {
+            r#type: ThinkingConfigType::Enabled,
+            budget_tokens: Some(budget_tokens),
+            display: None,
+        }
+    }
+
+    /// `{"type": "disabled"}`.
+    pub fn disabled() -> Self {
+        Self {
+            r#type: ThinkingConfigType::Disabled,
+            budget_tokens: None,
+            display: None,
+        }
+    }
+
+    pub fn with_display(mut self, display: ThinkingDisplay) -> Self {
+        self.display = Some(display);
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -312,7 +511,7 @@ pub struct TaskBudget {
     pub total: i32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PermissionRuleValue {
     pub tool_name: String,
@@ -320,20 +519,39 @@ pub struct PermissionRuleValue {
     pub rule_content: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A permission update (Python `PermissionUpdate`).
+///
+/// Every enum-typed field keeps values from a newer CLI verbatim (`Other`), so
+/// suggestions round-trip unchanged. Use [`PermissionUpdate::to_dict`] to
+/// build the validated control-protocol form.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PermissionUpdate {
-    pub r#type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r#type: PermissionUpdateType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rules: Option<Vec<PermissionRuleValue>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub behavior: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mode: Option<PermissionMode>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behavior: Option<PermissionBehavior>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<PermissionUpdateMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub directories: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub destination: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<PermissionUpdateDestination>,
+}
+
+impl PermissionUpdate {
+    /// An update of `kind` with every other field unset.
+    pub fn new(kind: impl Into<PermissionUpdateType>) -> Self {
+        Self {
+            r#type: kind.into(),
+            rules: None,
+            behavior: None,
+            mode: None,
+            directories: None,
+            destination: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]

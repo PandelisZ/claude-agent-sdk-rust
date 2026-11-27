@@ -67,7 +67,7 @@ fn serializes_thinking_and_json_schema_like_python_sdk() {
         .thinking(ThinkingConfig {
             r#type: ThinkingConfigType::Adaptive,
             budget_tokens: None,
-            display: Some("full".to_string()),
+            display: Some(crate::types::ThinkingDisplay::Summarized),
         })
         .output_format(output_format)
         .build();
@@ -84,7 +84,7 @@ fn serializes_thinking_and_json_schema_like_python_sdk() {
         args.windows(2)
             .find(|window| window[0] == "--thinking-display")
             .map(|window| window[1].as_str()),
-        Some("full")
+        Some("summarized")
     );
     assert_eq!(
         args.windows(2)
@@ -100,7 +100,7 @@ fn disabled_thinking_does_not_forward_display() {
         .thinking(ThinkingConfig {
             r#type: ThinkingConfigType::Disabled,
             budget_tokens: None,
-            display: Some("omitted".to_string()),
+            display: Some(crate::types::ThinkingDisplay::Omitted),
         })
         .build();
 
@@ -542,6 +542,7 @@ fn custom_system_prompt_uses_system_prompt_flag_and_setters_are_exclusive() {
             preset: "claude_code".to_string(),
             append: Some("extra".to_string()),
             exclude_dynamic_sections: Some(true),
+            snapshot: None,
         })
         .build();
     assert_eq!(options.exclude_dynamic_sections(), Some(true));

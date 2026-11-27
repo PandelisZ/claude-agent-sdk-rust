@@ -81,6 +81,22 @@ impl ClaudeAgentOptionsBuilder {
         self
     }
 
+    /// Register a user-implemented in-process MCP server (Python passes any
+    /// `McpServer` instance in `McpSdkServerConfig.instance`). Every JSON-RPC
+    /// message from the CLI is forwarded to `server`; the SDK still answers
+    /// notifications, rejects duplicate in-flight ids and handles
+    /// cancellation. Equivalent to
+    /// `sdk_mcp_server(name, SimpleMCPServer::from_server(name, server))`.
+    pub fn sdk_mcp_custom_server(
+        self,
+        name: impl Into<String>,
+        server: std::sync::Arc<dyn crate::mcp::SdkMcpServer>,
+    ) -> Self {
+        let name = name.into();
+        let wrapped = crate::mcp::SimpleMCPServer::from_server(name.clone(), server);
+        self.sdk_mcp_server(name, wrapped)
+    }
+
     pub fn mcp_servers(mut self, servers: HashMap<String, MCPServerConfig>) -> Self {
         self.options.mcp_servers = servers;
         self.options.mcp_servers_config = None;
