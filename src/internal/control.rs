@@ -1,5 +1,5 @@
 use crate::error::{CLIConnectionError, ClaudeSDKError, Result};
-use crate::internal::sdk_mcp::answer_mcp_message;
+use crate::internal::sdk_mcp::answer_mcp_control_request;
 use crate::internal::transport::Transport;
 use crate::types::{
     CanUseToolCallback, ClaudeAgentOptions, HookCallback, HookContext, PermissionResult,
@@ -265,9 +265,12 @@ pub(crate) async fn respond_to_control_request(
     }
 
     if subtype == "mcp_message" {
-        let response = answer_mcp_control_request(&request, callbacks);
-        let mut encoded =
-            serde_json::to_vec(&control_success_response_payload(request_id, response))?;
+        let response = match answer_mcp_control_request(&callbacks.sdk_mcp_servers, &request).await
+        {
+            Ok(response) => control_success_response_payload(request_id, response),
+            Err(error) => control_error_response_payload(request_id, &error),
+        };
+        let mut encoded = serde_json::to_vec(&response)?;
         encoded.push(b'\n');
         return transport.write(&encoded).await;
     }
@@ -381,20 +384,6 @@ fn convert_hook_output_for_cli(output: serde_json::Value) -> serde_json::Value {
         converted.insert(key, value);
     }
     serde_json::Value::Object(converted)
-}
-
-fn answer_mcp_control_request(
-    request: &serde_json::Map<String, serde_json::Value>,
-    callbacks: &ControlCallbacks,
-) -> serde_json::Value {
-    let server_name = request
-        .get("server_name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let message = request.get("message").unwrap_or(&serde_json::Value::Null);
-    serde_json::json!({
-        "mcp_response": answer_mcp_message(&callbacks.sdk_mcp_servers, server_name, message)
-    })
 }
 
 pub fn control_success_response_payload(

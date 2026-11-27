@@ -31,10 +31,10 @@ fn session_helpers_are_exported_at_crate_root() {
         serde_json::json!({"type": "object"}),
         MCPToolAnnotations {
             title: None,
-            read_only_hint: true,
-            destructive_hint: false,
-            idempotent_hint: true,
-            open_world_hint: false,
+            read_only_hint: Some(true),
+            destructive_hint: Some(false),
+            idempotent_hint: Some(true),
+            open_world_hint: Some(false),
             max_result_size_chars: None,
         },
         |_| Ok(Vec::<claude_code_sdk_rust::MCPContent>::new()),
@@ -185,4 +185,20 @@ fn options_workstream_exports_are_at_crate_root() {
 #[test]
 fn fold_session_summary_is_exported_at_crate_root() {
     let _ = claude_code_sdk_rust::fold_session_summary;
+}
+
+#[test]
+fn sdk_mcp_async_exports_are_present() {
+    let _ = std::mem::size_of::<claude_code_sdk_rust::SdkMcpToolResult>();
+    let _ = std::mem::size_of::<Option<std::sync::Arc<dyn claude_code_sdk_rust::SdkMcpServer>>>();
+    let _ = claude_code_sdk_rust::async_tool("t", "d", serde_json::json!({}), |_| async {
+        claude_code_sdk_rust::SdkMcpToolResult::text("ok")
+    });
+    let _ = claude_code_sdk_rust::async_tool_with_annotations(
+        "t",
+        "d",
+        serde_json::json!({}),
+        claude_code_sdk_rust::MCPToolAnnotations::new(),
+        |_| async { claude_code_sdk_rust::SdkMcpToolResult::text("ok") },
+    );
 }
