@@ -29,6 +29,9 @@ futures = "0.3"
 dirs = "5"
 opentelemetry = { version = "0.32", optional = true }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [features]
 otel = ["dep:opentelemetry"]
 

@@ -18,6 +18,7 @@ pub mod internal {
     #[cfg(test)]
     mod cli_args_tests;
     pub mod cli_discovery;
+    pub mod client_app;
     pub mod control;
     pub mod message_parser;
     pub mod parser;

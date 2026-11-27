@@ -29,18 +29,37 @@ impl ClaudeAgentOptionsBuilder {
         self
     }
 
+    /// Plain-text system prompt (`--system-prompt <prompt>`). Replaces any
+    /// preset, custom or file system prompt set earlier.
     pub fn system_prompt(mut self, prompt: impl Into<String>) -> Self {
-        self.options.system_prompt = Some(prompt.into());
+        self.options
+            .set_system_prompt(SystemPrompt::Text(prompt.into()));
         self
     }
 
+    /// Preset system prompt. Replaces any other system prompt set earlier.
     pub fn system_prompt_preset(mut self, preset: SystemPromptPreset) -> Self {
-        self.options.system_prompt_preset = Some(preset);
+        self.options.set_system_prompt(preset);
         self
     }
 
+    /// System prompt read from a file (`--system-prompt-file <path>`).
+    /// Replaces any other system prompt set earlier.
     pub fn system_prompt_file(mut self, file: SystemPromptFile) -> Self {
-        self.options.system_prompt_file = Some(file);
+        self.options.set_system_prompt(file);
+        self
+    }
+
+    /// Custom system prompt that can set `snapshot`. Replaces any other
+    /// system prompt set earlier.
+    pub fn system_prompt_custom(mut self, custom: SystemPromptCustom) -> Self {
+        self.options.set_system_prompt(custom);
+        self
+    }
+
+    /// Set the system prompt from any form of the Python union.
+    pub fn system_prompt_config(mut self, prompt: impl Into<SystemPrompt>) -> Self {
+        self.options.set_system_prompt(prompt);
         self
     }
 
@@ -96,6 +115,21 @@ impl ClaudeAgentOptionsBuilder {
 
     pub fn fork_session(mut self, fork: bool) -> Self {
         self.options.fork_session = fork;
+        self
+    }
+
+    /// Only load the resumed conversation up to and including this message
+    /// UUID (`--resume-session-at=<uuid>`).
+    pub fn resume_session_at(mut self, message_uuid: impl Into<String>) -> Self {
+        self.options.resume_session_at = Some(message_uuid.into());
+        self
+    }
+
+    /// UUID of the user prompt whose turn a truncating resume discards
+    /// (`--resume-drops-turn=<uuid>`). See
+    /// [`ClaudeAgentOptions::resume_drops_turn`].
+    pub fn resume_drops_turn(mut self, prompt_uuid: impl Into<String>) -> Self {
+        self.options.resume_drops_turn = Some(prompt_uuid.into());
         self
     }
 
@@ -220,8 +254,29 @@ impl ClaudeAgentOptionsBuilder {
         self
     }
 
+    /// Add an extra CLI flag. Setting a flag again replaces its value in
+    /// place, keeping its original position (Python dict semantics).
     pub fn extra_arg(mut self, key: impl Into<String>, value: Option<String>) -> Self {
-        self.options.extra_args.insert(key.into(), value);
+        let key = key.into();
+        if let Some(entry) = self
+            .options
+            .extra_args
+            .iter_mut()
+            .find(|(existing, _)| existing == &key)
+        {
+            entry.1 = value;
+        } else {
+            self.options.extra_args.push((key, value));
+        }
+        self
+    }
+
+    /// Replace every extra CLI flag, in the given order.
+    pub fn extra_args(mut self, args: Vec<(String, Option<String>)>) -> Self {
+        self.options.extra_args = Vec::new();
+        for (key, value) in args {
+            self = self.extra_arg(key, value);
+        }
         self
     }
 
@@ -242,6 +297,19 @@ impl ClaudeAgentOptionsBuilder {
 
     pub fn include_hook_events(mut self, include: bool) -> Self {
         self.options.include_hook_events = include;
+        self
+    }
+
+    /// Forward subagent text and thinking blocks into the message stream.
+    pub fn forward_subagent_text(mut self, forward: bool) -> Self {
+        self.options.forward_subagent_text = forward;
+        self
+    }
+
+    /// Mark every outgoing user message `client_composed` so Claude Code
+    /// delivers it as written (no `@path` expansion, no slash commands).
+    pub fn verbatim_prompts(mut self, verbatim: bool) -> Self {
+        self.options.verbatim_prompts = verbatim;
         self
     }
 
@@ -341,6 +409,14 @@ impl ClaudeAgentOptionsBuilder {
 
     pub fn load_timeout_ms(mut self, timeout_ms: i32) -> Self {
         self.options.load_timeout_ms = timeout_ms;
+        self
+    }
+
+    /// App/library identifier sent to the API via
+    /// `CLAUDE_AGENT_SDK_CLIENT_APP`; pass `""` to send none. Must be valid in
+    /// an HTTP header (no characters above U+00FF).
+    pub fn client_app(mut self, client_app: impl Into<String>) -> Self {
+        self.options.client_app = Some(client_app.into());
         self
     }
 

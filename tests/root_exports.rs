@@ -118,3 +118,9 @@ fn session_helpers_are_exported_at_crate_root() {
     assert!(!claude_code_sdk_rust::is_terminal_task_status("running"));
     assert!(claude_code_sdk_rust::TERMINAL_TASK_STATUSES.contains(&"killed"));
 }
+
+#[test]
+fn options_workstream_exports_are_at_crate_root() {
+    let _ = std::mem::size_of::<claude_code_sdk_rust::SystemPromptCustom>();
+    let _ = std::mem::size_of::<claude_code_sdk_rust::SystemPrompt>();
+}
