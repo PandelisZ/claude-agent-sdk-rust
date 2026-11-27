@@ -305,15 +305,18 @@ open_string_enum! {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum MCPServerConnectionStatus {
-    Connected,
-    Failed,
-    #[serde(rename = "needs-auth")]
-    NeedsAuth,
-    Pending,
-    Disabled,
+open_string_enum! {
+    /// Connection status of an MCP server in a `get_mcp_status` response.
+    /// Unknown values are preserved in [`MCPServerConnectionStatus::Other`]
+    /// (Python returns the raw dict, so a new CLI status never fails the
+    /// whole call).
+    pub enum MCPServerConnectionStatus {
+        Connected => "connected",
+        Failed => "failed",
+        NeedsAuth => "needs-auth",
+        Pending => "pending",
+        Disabled => "disabled",
+    }
 }
 
 // MCP Server Config Types (tagged enum pattern)
@@ -719,6 +722,7 @@ pub struct MCPServerStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MCPStatusResponse {
+    #[serde(default)]
     pub mcp_servers: Vec<MCPServerStatus>,
 }
 
@@ -876,8 +880,15 @@ impl<'de> Deserialize<'de> for RateLimitInfo {
 
 // MCP Server Status Config (tagged enum)
 
+/// Server configuration as reported by `get_mcp_status` (Python
+/// `McpServerStatusConfig`).
+///
+/// Deserialization is lenient, like Python (which returns the raw dict): a
+/// stdio config without `type` parses as [`Self::Stdio`], and a config of
+/// any other or unexpected shape is kept as [`Self::Other`] rather than
+/// failing the whole response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(remote = "Self", tag = "type", rename_all = "camelCase")]
 pub enum MCPServerStatusConfig {
     #[serde(rename = "sdk")]
     Sdk { name: String },
@@ -902,4 +913,36 @@ pub enum MCPServerStatusConfig {
         #[serde(skip_serializing_if = "Option::is_none")]
         env: Option<HashMap<String, String>>,
     },
+    /// A config type this SDK does not model (for example an IDE transport
+    /// such as `ws`), or a known type with an unexpected shape. Holds the
+    /// raw JSON as sent by the CLI.
+    #[serde(skip)]
+    Other(serde_json::Value),
+}
+
+impl Serialize for MCPServerStatusConfig {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        match self {
+            MCPServerStatusConfig::Other(value) => value.serialize(serializer),
+            other => MCPServerStatusConfig::serialize(other, serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for MCPServerStatusConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let raw = serde_json::Value::deserialize(deserializer)?;
+        let mut value = raw.clone();
+        if let serde_json::Value::Object(map) = &mut value {
+            if !map.contains_key("type") {
+                map.insert("type".to_string(), serde_json::json!("stdio"));
+            }
+        }
+        Ok(MCPServerStatusConfig::deserialize(value).unwrap_or(MCPServerStatusConfig::Other(raw)))
+    }
 }

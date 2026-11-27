@@ -517,8 +517,14 @@ pub enum ValidationFailure {
 /// `dependentRequired`, `items`, `prefixItems`, `minItems`, `maxItems`,
 /// `uniqueItems`, `minLength`, `maxLength`, `minimum`, `maximum`,
 /// `exclusiveMinimum`, `exclusiveMaximum`, `multipleOf`, `allOf`, `anyOf`,
-/// `oneOf`, `not`, `if`/`then`/`else`, local `$ref`s and boolean schemas.
-/// `pattern`, `patternProperties` and `format` are not checked.
+/// `oneOf`, `not`, `if`/`then`/`else`, `pattern`, `patternProperties`,
+/// local `$ref`s and boolean schemas. `format` is not checked (Python's
+/// `jsonschema.validate` does not check it by default either).
+///
+/// Patterns use `re.search` semantics (unanchored). They are compiled with
+/// the `regex` crate; a pattern it cannot compile (for example one using
+/// look-around or backreferences) is a [`ValidationFailure::Schema`], so the
+/// tool never runs with unchecked input.
 pub fn validate_arguments(instance: &Value, schema: &Value) -> Result<(), ValidationFailure> {
     check_schema(schema).map_err(ValidationFailure::Schema)?;
     let mut errors = Vec::new();
@@ -600,6 +606,21 @@ fn check_schema(schema: &Value) -> Result<(), String> {
             }
         }
     }
+    if let Some(pattern) = object.get("pattern") {
+        let Some(pattern) = pattern.as_str() else {
+            return Err(format!("{} is not of type 'string'", py_repr(pattern)));
+        };
+        compile_pattern(pattern)?;
+    }
+    if let Some(value) = object.get("patternProperties") {
+        let Some(map) = value.as_object() else {
+            return Err(format!("{} is not of type 'object'", py_repr(value)));
+        };
+        for (pattern, sub) in map {
+            compile_pattern(pattern)?;
+            check_schema(sub)?;
+        }
+    }
     for keyword in ["properties", "$defs", "definitions"] {
         if let Some(value) = object.get(keyword) {
             let Some(map) = value.as_object() else {
@@ -632,6 +653,23 @@ fn check_schema(schema: &Value) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Compile a JSON Schema pattern, reporting an unusable one the way
+/// jsonschema's schema check does.
+fn compile_pattern(pattern: &str) -> Result<regex::Regex, String> {
+    regex::Regex::new(pattern).map_err(|_| {
+        format!(
+            "{} is not a 'regex'",
+            py_repr(&Value::String(pattern.to_string()))
+        )
+    })
+}
+
+/// `re.search(pattern, text)`; patterns were already checked by
+/// `check_schema`, so a compile failure here only means "no match".
+fn pattern_matches(pattern: &str, text: &str) -> bool {
+    compile_pattern(pattern).is_ok_and(|regex| regex.is_match(text))
 }
 
 struct SchemaError {
@@ -777,6 +815,18 @@ impl<'a> Validator<'a> {
                             "is too long"
                         };
                         push(errors, format!("{} {message}", py_repr(instance)));
+                    }
+                }
+                if let Some(pattern) = object.get("pattern").and_then(|v| v.as_str()) {
+                    if !pattern_matches(pattern, text) {
+                        push(
+                            errors,
+                            format!(
+                                "{} does not match {}",
+                                py_repr(instance),
+                                py_repr(&Value::String(pattern.to_string()))
+                            ),
+                        );
                     }
                 }
             }
@@ -942,39 +992,60 @@ impl<'a> Validator<'a> {
                 }
             }
         }
+        let pattern_properties = object.get("patternProperties").and_then(|v| v.as_object());
+        if let Some(pattern_properties) = pattern_properties {
+            for (pattern, sub) in pattern_properties {
+                for (key, value) in map {
+                    if pattern_matches(pattern, key) {
+                        self.validate(value, sub, depth + 1, errors);
+                    }
+                }
+            }
+        }
         if let Some(additional) = object.get("additionalProperties") {
-            // Without regex support, patternProperties would make every
-            // matching key look "additional"; skip the check then.
-            if !object.contains_key("patternProperties") {
-                let mut extras: Vec<&String> = map
-                    .keys()
-                    .filter(|key| properties.is_none_or(|p| !p.contains_key(*key)))
-                    .collect();
-                extras.sort();
-                match additional {
-                    Value::Bool(false) if !extras.is_empty() => {
-                        let verb = if extras.len() == 1 { "was" } else { "were" };
-                        let listed = extras
-                            .iter()
-                            .map(|key| py_repr(&Value::String((*key).clone())))
+            let mut extras: Vec<&String> = map
+                .keys()
+                .filter(|key| properties.is_none_or(|p| !p.contains_key(*key)))
+                .filter(|key| {
+                    pattern_properties
+                        .is_none_or(|patterns| !patterns.keys().any(|p| pattern_matches(p, key)))
+                })
+                .collect();
+            extras.sort();
+            let repr_key = |key: &String| py_repr(&Value::String(key.clone()));
+            match additional {
+                Value::Bool(false) if !extras.is_empty() => {
+                    let listed = extras
+                        .iter()
+                        .map(|key| repr_key(key))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let message = if let Some(pattern_properties) = pattern_properties {
+                        let verb = if extras.len() == 1 { "does" } else { "do" };
+                        let mut patterns: Vec<&String> = pattern_properties.keys().collect();
+                        patterns.sort();
+                        let patterns = patterns
+                            .into_iter()
+                            .map(repr_key)
                             .collect::<Vec<_>>()
                             .join(", ");
-                        push(
-                            errors,
-                            format!(
-                                "Additional properties are not allowed ({listed} {verb} unexpected)"
-                            ),
-                        );
-                    }
-                    Value::Object(_) => {
-                        for key in extras {
-                            if let Some(value) = map.get(key) {
-                                self.validate(value, additional, depth + 1, errors);
-                            }
+                        format!("{listed} {verb} not match any of the regexes: {patterns}")
+                    } else {
+                        let verb = if extras.len() == 1 { "was" } else { "were" };
+                        format!(
+                            "Additional properties are not allowed ({listed} {verb} unexpected)"
+                        )
+                    };
+                    push(errors, message);
+                }
+                Value::Object(_) => {
+                    for key in extras {
+                        if let Some(value) = map.get(key) {
+                            self.validate(value, additional, depth + 1, errors);
                         }
                     }
-                    _ => {}
                 }
+                _ => {}
             }
         }
         let count = map.len() as f64;
@@ -1286,5 +1357,100 @@ mod tests {
             Err(ValidationFailure::Schema(message)) => assert!(message.contains("bogus")),
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn pattern_is_enforced_like_jsonschema() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"id": {"type": "string", "pattern": "^[a-z0-9-]+$"}},
+            "required": ["id"],
+        });
+        assert_eq!(
+            validate_arguments(&json!({"id": "../../etc/passwd"}), &schema),
+            Err(ValidationFailure::Instance(
+                "'../../etc/passwd' does not match '^[a-z0-9-]+$'".to_string()
+            ))
+        );
+        assert_eq!(validate_arguments(&json!({"id": "abc-1"}), &schema), Ok(()));
+        // re.search semantics: unanchored.
+        assert_eq!(
+            validate_arguments(&json!("xxabcxx"), &json!({"pattern": "abc"})),
+            Ok(())
+        );
+        // Non-strings are ignored by `pattern`.
+        assert_eq!(
+            validate_arguments(&json!(5), &json!({"pattern": "^a$"})),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn pattern_properties_are_enforced_like_jsonschema() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "patternProperties": {"^x-": {"type": "integer"}},
+            "additionalProperties": false,
+        });
+        assert_eq!(
+            validate_arguments(&json!({"name": "n", "x-a": 1}), &schema),
+            Ok(())
+        );
+        assert_eq!(
+            validate_arguments(&json!({"x-a": "one"}), &schema),
+            Err(ValidationFailure::Instance(
+                "'one' is not of type 'integer'".to_string()
+            ))
+        );
+        assert_eq!(
+            validate_arguments(&json!({"other": 1}), &schema),
+            Err(ValidationFailure::Instance(
+                "'other' does not match any of the regexes: '^x-'".to_string()
+            ))
+        );
+        assert_eq!(
+            validate_arguments(&json!({"b": 1, "a": 2}), &schema),
+            Err(ValidationFailure::Instance(
+                "'a', 'b' do not match any of the regexes: '^x-'".to_string()
+            ))
+        );
+        // additionalProperties as a schema applies only to non-matching keys.
+        let typed = json!({
+            "type": "object",
+            "patternProperties": {"^n": {"type": "integer"}},
+            "additionalProperties": {"type": "string"},
+        });
+        assert_eq!(
+            validate_arguments(&json!({"n1": 1, "s": "x"}), &typed),
+            Ok(())
+        );
+        assert_eq!(
+            validate_arguments(&json!({"s": 1}), &typed),
+            Err(ValidationFailure::Instance(
+                "1 is not of type 'string'".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn unusable_patterns_fail_closed_as_schema_errors() {
+        for schema in [
+            json!({"type": "string", "pattern": "("}),
+            // Look-around is not supported by the regex crate.
+            json!({"type": "string", "pattern": "^(?!admin).*$"}),
+            json!({"type": "object", "patternProperties": {"[": {}}}),
+        ] {
+            match validate_arguments(&json!("x"), &schema) {
+                Err(ValidationFailure::Schema(message)) => {
+                    assert!(message.ends_with("is not a 'regex'"), "{message}")
+                }
+                other => panic!("unexpected {other:?} for {schema}"),
+            }
+        }
+        assert!(matches!(
+            validate_arguments(&json!("x"), &json!({"pattern": 1})),
+            Err(ValidationFailure::Schema(_))
+        ));
     }
 }

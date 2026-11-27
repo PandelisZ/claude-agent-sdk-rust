@@ -28,6 +28,7 @@ tracing = "0.1"
 async-trait = "0.1"
 which = "6"
 futures = "0.3"
+regex = "1"
 dirs = "5"
 opentelemetry = { version = "0.32", optional = true }
 
