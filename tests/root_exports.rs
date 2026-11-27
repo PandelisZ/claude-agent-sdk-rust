@@ -118,3 +118,8 @@ fn session_helpers_are_exported_at_crate_root() {
     assert!(!claude_code_sdk_rust::is_terminal_task_status("running"));
     assert!(claude_code_sdk_rust::TERMINAL_TASK_STATUSES.contains(&"killed"));
 }
+
+#[test]
+fn fold_session_summary_is_exported_at_crate_root() {
+    let _ = claude_code_sdk_rust::fold_session_summary;
+}

@@ -1,5 +1,6 @@
 use crate::session_store::{SessionKey, SessionStoreEntry, SessionSummaryEntry};
-use crate::sessions::SDKSessionInfo;
+use crate::sessions::chain::truthy;
+use crate::sessions::{lite, SDKSessionInfo};
 
 const LAST_WINS_FIELDS: &[(&str, &str)] = &[
     ("customTitle", "custom_title"),
@@ -32,19 +33,11 @@ pub fn summary_entry_to_sdk_info(
     project_path: Option<&str>,
 ) -> Option<SDKSessionInfo> {
     let data = &entry.data;
-    if data
-        .get("is_sidechain")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false)
-    {
+    if truthy(data.get("is_sidechain")) {
         return None;
     }
 
-    let first_prompt = if data
-        .get("first_prompt_locked")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false)
-    {
+    let first_prompt = if truthy(data.get("first_prompt_locked")) {
         string_data(data, "first_prompt")
     } else {
         string_data(data, "command_fallback")
@@ -64,7 +57,11 @@ pub fn summary_entry_to_sdk_info(
         custom_title,
         first_prompt,
         git_branch: string_data(data, "git_branch"),
-        cwd: string_data(data, "cwd").or_else(|| project_path.map(String::from)),
+        cwd: string_data(data, "cwd").or_else(|| {
+            project_path
+                .filter(|path| !path.is_empty())
+                .map(String::from)
+        }),
         tag: string_data(data, "tag"),
         created_at: data.get("created_at").and_then(|value| value.as_i64()),
     })
@@ -139,20 +136,15 @@ fn fold_entry(data: &mut serde_json::Map<String, serde_json::Value>, entry: &Ses
 }
 
 fn iso_to_epoch_ms(timestamp: &str) -> Option<i64> {
-    chrono::DateTime::parse_from_rfc3339(timestamp)
-        .ok()
-        .map(|dt| dt.timestamp_millis())
+    lite::iso_to_epoch_ms(timestamp)
 }
 
+/// Replicates `_extract_first_prompt_from_head` for a single parsed entry.
 fn fold_first_prompt(
     data: &mut serde_json::Map<String, serde_json::Value>,
     entry: &SessionStoreEntry,
 ) {
-    if data
-        .get("first_prompt_locked")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
+    if truthy(data.get("first_prompt_locked")) {
         return;
     }
     if entry.get("type").and_then(|v| v.as_str()) != Some("user") {
@@ -165,52 +157,32 @@ fn fold_first_prompt(
         return;
     }
 
-    for raw in entry_text_blocks(entry) {
-        let mut prompt = raw.replace('\n', " ").trim().to_string();
+    for raw in lite::entry_text_blocks(entry) {
+        let prompt = raw.replace('\n', " ").trim().to_string();
         if prompt.is_empty() {
             continue;
         }
-        if let Some(command) = command_name(&prompt) {
-            data.entry("command_fallback".to_string())
-                .or_insert_with(|| serde_json::Value::String(command));
+        if let Some(command) = lite::command_name(&prompt) {
+            if !truthy(data.get("command_fallback")) {
+                data.insert(
+                    "command_fallback".to_string(),
+                    serde_json::Value::String(command),
+                );
+            }
             continue;
         }
-        if should_skip_first_prompt(&prompt) {
+        if lite::should_skip_first_prompt(&prompt) {
             continue;
-        }
-        if prompt.len() > 200 {
-            prompt.truncate(200);
-            prompt = prompt.trim_end().to_string();
-            prompt.push('\u{2026}');
         }
         data.insert(
             "first_prompt".to_string(),
-            serde_json::Value::String(prompt),
+            serde_json::Value::String(lite::truncate_prompt(prompt)),
         );
         data.insert(
             "first_prompt_locked".to_string(),
             serde_json::Value::Bool(true),
         );
         return;
-    }
-}
-
-fn entry_text_blocks(entry: &SessionStoreEntry) -> Vec<String> {
-    let Some(message) = entry.get("message").and_then(|v| v.as_object()) else {
-        return Vec::new();
-    };
-    match message.get("content") {
-        Some(serde_json::Value::String(text)) => vec![text.clone()],
-        Some(serde_json::Value::Array(blocks)) => blocks
-            .iter()
-            .filter_map(|block| {
-                let block = block.as_object()?;
-                (block.get("type").and_then(|v| v.as_str()) == Some("text"))
-                    .then(|| block.get("text").and_then(|v| v.as_str()).map(String::from))
-                    .flatten()
-            })
-            .collect(),
-        _ => Vec::new(),
     }
 }
 
@@ -229,23 +201,6 @@ fn carries_tool_result(entry: &SessionStoreEntry) -> bool {
                     == Some("tool_result")
             })
         })
-}
-
-fn command_name(prompt: &str) -> Option<String> {
-    let start = prompt.find("<command-name>")? + "<command-name>".len();
-    let end = prompt[start..].find("</command-name>")? + start;
-    Some(prompt[start..end].to_string())
-}
-
-fn should_skip_first_prompt(prompt: &str) -> bool {
-    let trimmed = prompt.trim_start();
-    trimmed.starts_with("<local-command-stdout>")
-        || trimmed.starts_with("<session-start-hook>")
-        || trimmed.starts_with("<tick>")
-        || trimmed.starts_with("<goal>")
-        || trimmed.starts_with("[Request interrupted by user")
-        || (trimmed.starts_with("<ide_opened_file>") && trimmed.ends_with("</ide_opened_file>"))
-        || (trimmed.starts_with("<ide_selection>") && trimmed.ends_with("</ide_selection>"))
 }
 
 #[cfg(test)]
@@ -292,6 +247,32 @@ mod tests {
         assert_eq!(summary.data["first_prompt"], "Real prompt");
         assert_eq!(summary.data["last_prompt"], "latest prompt");
         assert_eq!(summary.data["git_branch"], "main");
+    }
+
+    #[test]
+    fn truncates_multibyte_first_prompt_by_code_points() {
+        // Byte 200 of this prompt is not a char boundary; the old byte-based
+        // truncate panicked here.
+        let prompt = format!("a{}", "\u{4f60}".repeat(300));
+        let entry = serde_json::json!({"type": "user", "message": {"content": prompt}})
+            .as_object()
+            .unwrap()
+            .clone();
+        let summary = fold_session_summary(None, &key(), &[entry]);
+        let first = summary.data["first_prompt"].as_str().unwrap();
+        assert_eq!(first.chars().count(), 201);
+        assert!(first.ends_with('\u{2026}'));
+
+        let interrupted = serde_json::json!({
+            "type": "user",
+            "message": {"content": "[Request interrupted by user"}
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let summary = fold_session_summary(None, &key(), &[interrupted]);
+        // No closing bracket: the skip pattern does not match.
+        assert_eq!(summary.data["first_prompt"], "[Request interrupted by user");
     }
 
     #[test]

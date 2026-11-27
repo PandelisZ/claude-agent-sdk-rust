@@ -1,225 +1,408 @@
-use crate::error::{ClaudeSDKError, Result};
-use crate::session_store::{
-    project_key_for_directory, SessionKey, SessionStoreEntry, SessionStoreHandle,
-};
-use crate::session_summary::{fold_session_summary, summary_entry_to_sdk_info};
-use serde::{Deserialize, Serialize};
-use std::path::Path;
+//! `SessionStore`-backed session helpers (upstream `_internal/sessions.py`
+//! and `_internal/session_mutations.py`, "SessionStore-backed" sections).
 
+use crate::error::{ClaudeSDKError, Result};
+use crate::internal::sessions_fs::apply_sort_limit_offset;
+use crate::session_store::{
+    SessionKey, SessionListSubkeysKey, SessionStoreEntry, SessionStoreHandle, SessionStoreListEntry,
+};
+use crate::session_summary::summary_entry_to_sdk_info;
+use crate::sessions::fork_core::iso_now;
+use crate::sessions::paths::{canonicalize_path, is_valid_uuid, sanitize_path};
+use crate::sessions::{chain, lite, sanitize, SessionMessage};
+use futures::stream::{self, StreamExt};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+/// Upper bound on concurrent `store.load()` calls in `list_sessions_from_store`.
+const STORE_LIST_LOAD_CONCURRENCY: usize = 16;
+
+/// Session metadata (Python `SDKSessionInfo`), returned by `list_sessions()`,
+/// `get_session_info()` and their store-backed variants.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SDKSessionInfo {
+    /// Unique session identifier (UUID).
     pub session_id: String,
+    /// Display title: custom title, last prompt, summary, or first prompt.
     pub summary: String,
+    /// Last modified time in milliseconds since epoch.
     pub last_modified: i64,
+    /// Transcript size in bytes (local JSONL / serialized store entries).
+    #[serde(default)]
     pub file_size: Option<i64>,
+    /// User-set custom title or AI-generated title.
+    #[serde(default)]
     pub custom_title: Option<String>,
+    /// First meaningful user prompt.
+    #[serde(default)]
     pub first_prompt: Option<String>,
+    /// Git branch at the end of the session.
+    #[serde(default)]
     pub git_branch: Option<String>,
+    /// Working directory for the session.
+    #[serde(default)]
     pub cwd: Option<String>,
+    /// User-set session tag.
+    #[serde(default)]
     pub tag: Option<String>,
+    /// Creation time (ms since epoch) from the first entry's timestamp.
+    #[serde(default)]
     pub created_at: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct SDKSessionMessage {
-    pub r#type: String,
-    pub uuid: String,
-    pub session_id: String,
-    pub message: serde_json::Value,
-    pub parent_tool_use_id: Option<String>,
+impl SDKSessionInfo {
+    /// A row with only the required fields set (Python dataclass defaults).
+    pub fn new(
+        session_id: impl Into<String>,
+        summary: impl Into<String>,
+        last_modified: i64,
+    ) -> Self {
+        Self {
+            session_id: session_id.into(),
+            summary: summary.into(),
+            last_modified,
+            file_size: None,
+            custom_title: None,
+            first_prompt: None,
+            git_branch: None,
+            cwd: None,
+            tag: None,
+            created_at: None,
+        }
+    }
 }
 
+/// Former name of [`SessionMessage`] for store-backed readers; local and store
+/// readers now share one type.
+pub type SDKSessionMessage = SessionMessage;
+
+fn invalid_session_id(session_id: &str) -> ClaudeSDKError {
+    ClaudeSDKError::Session(format!("Invalid session_id: {session_id}"))
+}
+
+/// `project_path` (canonical directory, default `.`) and its `project_key`.
+fn project_path_and_key(directory: Option<&str>) -> (String, String) {
+    let project_path = canonicalize_path(directory.unwrap_or("."));
+    let project_key = sanitize_path(&project_path);
+    (project_path, project_key)
+}
+
+fn main_key(project_key: &str, session_id: &str) -> SessionKey {
+    SessionKey {
+        project_key: project_key.to_string(),
+        session_id: session_id.to_string(),
+        subpath: None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mutations
+// ---------------------------------------------------------------------------
+
+/// Rename a session by appending a `custom-title` entry to the store.
 pub async fn rename_session_via_store(
     session_store: &SessionStoreHandle,
     session_id: &str,
     title: &str,
     directory: Option<&str>,
 ) -> Result<()> {
-    validate_session_id(session_id)?;
+    if !is_valid_uuid(session_id) {
+        return Err(invalid_session_id(session_id));
+    }
     let title = title.trim();
     if title.is_empty() {
         return Err(ClaudeSDKError::Session(
             "title must be non-empty".to_string(),
         ));
     }
-    let project_key = project_key_for_directory(directory.map(Path::new));
+    let (_, project_key) = project_path_and_key(directory);
+    let entry = serde_json::json!({
+        "type": "custom-title",
+        "customTitle": title,
+        "sessionId": session_id,
+        "uuid": uuid::Uuid::new_v4().to_string(),
+        "timestamp": iso_now(),
+    });
     session_store
-        .append(
-            SessionKey {
-                project_key,
-                session_id: session_id.to_string(),
-                subpath: None,
-            },
-            vec![metadata_entry(
-                "custom-title",
-                session_id,
-                [("customTitle", serde_json::Value::String(title.to_string()))],
-            )],
-        )
+        .append(main_key(&project_key, session_id), vec![into_entry(entry)])
         .await
 }
 
+/// Tag a session by appending a `tag` entry to the store. `None` clears it.
 pub async fn tag_session_via_store(
     session_store: &SessionStoreHandle,
     session_id: &str,
     tag: Option<&str>,
     directory: Option<&str>,
 ) -> Result<()> {
-    validate_session_id(session_id)?;
-    let tag = tag.map(sanitize_tag).transpose()?;
-    let project_key = project_key_for_directory(directory.map(Path::new));
+    if !is_valid_uuid(session_id) {
+        return Err(invalid_session_id(session_id));
+    }
+    let tag = tag.map(sanitize::sanitize_tag).transpose()?;
+    let (_, project_key) = project_path_and_key(directory);
+    let entry = serde_json::json!({
+        "type": "tag",
+        "tag": tag.unwrap_or_default(),
+        "sessionId": session_id,
+        "uuid": uuid::Uuid::new_v4().to_string(),
+        "timestamp": iso_now(),
+    });
     session_store
-        .append(
-            SessionKey {
-                project_key,
-                session_id: session_id.to_string(),
-                subpath: None,
-            },
-            vec![metadata_entry(
-                "tag",
-                session_id,
-                [("tag", serde_json::Value::String(tag.unwrap_or_default()))],
-            )],
-        )
+        .append(main_key(&project_key, session_id), vec![into_entry(entry)])
         .await
 }
 
+/// Delete a session from the store (a no-op for stores without `delete`).
 pub async fn delete_session_via_store(
     session_store: &SessionStoreHandle,
     session_id: &str,
     directory: Option<&str>,
 ) -> Result<()> {
-    validate_session_id(session_id)?;
-    let project_key = project_key_for_directory(directory.map(Path::new));
+    if !is_valid_uuid(session_id) {
+        return Err(invalid_session_id(session_id));
+    }
+    let (_, project_key) = project_path_and_key(directory);
     session_store
-        .delete(SessionKey {
-            project_key,
-            session_id: session_id.to_string(),
-            subpath: None,
-        })
+        .delete(main_key(&project_key, session_id))
         .await
 }
 
+fn into_entry(value: Value) -> SessionStoreEntry {
+    match value {
+        Value::Object(map) => map,
+        _ => SessionStoreEntry::new(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Listing / info
+// ---------------------------------------------------------------------------
+
+/// `_load_store_entries_as_jsonl`: `None` when the session has no entries.
+async fn load_store_entries_as_jsonl(
+    session_store: &SessionStoreHandle,
+    project_key: &str,
+    session_id: &str,
+) -> Result<Option<String>> {
+    let entries = session_store
+        .load(main_key(project_key, session_id))
+        .await?;
+    Ok(entries
+        .filter(|entries| !entries.is_empty())
+        .map(|entries| lite::entries_to_jsonl(&entries)))
+}
+
+/// `_derive_infos_via_load`: bounded-concurrency `load()` + lite-parse per
+/// listing row. Adapter errors degrade the row to an empty summary; sidechain
+/// and no-summary sessions are dropped.
+async fn derive_infos_via_load(
+    session_store: &SessionStoreHandle,
+    listing: &[SessionStoreListEntry],
+    project_key: &str,
+    project_path: &str,
+) -> Vec<SDKSessionInfo> {
+    let outcomes: Vec<Result<Option<String>>> = stream::iter(listing.iter())
+        .map(|entry| load_store_entries_as_jsonl(session_store, project_key, &entry.session_id))
+        .buffered(STORE_LIST_LOAD_CONCURRENCY)
+        .collect()
+        .await;
+
+    let mut results = Vec::new();
+    for (entry, outcome) in listing.iter().zip(outcomes) {
+        match outcome {
+            Err(_) => results.push(SDKSessionInfo::new(&entry.session_id, "", entry.mtime)),
+            Ok(None) => {}
+            Ok(Some(jsonl)) => {
+                let lite = lite::jsonl_to_lite(&jsonl, entry.mtime);
+                if let Some(mut parsed) =
+                    lite::parse_session_info_from_lite(&entry.session_id, &lite, Some(project_path))
+                {
+                    parsed.last_modified = entry.mtime;
+                    results.push(parsed);
+                }
+            }
+        }
+    }
+    results
+}
+
+/// List sessions from a `SessionStore`, sorted by `last_modified` descending.
+///
+/// Uses `list_session_summaries()` when the store supports it (gap-filling
+/// missing or stale summaries from `list_sessions()` + `load()` after
+/// pagination); otherwise loads every session listed by `list_sessions()`.
+/// Errors when the store supports neither.
 pub async fn list_sessions_from_store(
     session_store: &SessionStoreHandle,
     directory: Option<&str>,
     limit: Option<usize>,
     offset: usize,
 ) -> Result<Vec<SDKSessionInfo>> {
-    let project_path = canonical_project_path(directory);
-    let project_key = project_key_for_directory(Some(Path::new(&project_path)));
+    let (project_path, project_key) = project_path_and_key(directory);
+    let has_list_sessions = session_store.supports_list_sessions();
+
+    if session_store.supports_list_session_summaries() {
+        let summaries = session_store.list_session_summaries(&project_key).await?;
+        let (listing, known_mtimes) = if has_list_sessions {
+            let listing = session_store.list_sessions(&project_key).await?;
+            let known = listing
+                .iter()
+                .map(|entry| (entry.session_id.clone(), entry.mtime))
+                .collect::<std::collections::HashMap<_, _>>();
+            (listing, known)
+        } else {
+            tracing::debug!(
+                "list_session_summaries without list_sessions: gap-fill skipped; \
+                 sessions lacking a sidecar will be omitted"
+            );
+            (Vec::new(), std::collections::HashMap::new())
+        };
+
+        struct Slot {
+            mtime: i64,
+            session_id: String,
+            info: Option<SDKSessionInfo>,
+        }
+        let mut slots = Vec::new();
+        let mut fresh_summary_ids = std::collections::HashSet::new();
+        for summary in &summaries {
+            if has_list_sessions {
+                match known_mtimes.get(&summary.session_id) {
+                    None => continue,
+                    Some(known) if summary.mtime < *known => continue,
+                    Some(_) => {}
+                }
+            }
+            fresh_summary_ids.insert(summary.session_id.clone());
+            if let Some(info) = summary_entry_to_sdk_info(summary, Some(&project_path)) {
+                slots.push(Slot {
+                    mtime: summary.mtime,
+                    session_id: summary.session_id.clone(),
+                    info: Some(info),
+                });
+            }
+        }
+        if has_list_sessions {
+            slots.extend(
+                listing
+                    .iter()
+                    .filter(|entry| !fresh_summary_ids.contains(&entry.session_id))
+                    .map(|entry| Slot {
+                        mtime: entry.mtime,
+                        session_id: entry.session_id.clone(),
+                        info: None,
+                    }),
+            );
+        }
+
+        slots.sort_by_key(|slot| std::cmp::Reverse(slot.mtime));
+        let mut page = chain::page(slots, limit, offset);
+
+        let to_fill: Vec<SessionStoreListEntry> = page
+            .iter()
+            .filter(|slot| slot.info.is_none())
+            .map(|slot| SessionStoreListEntry {
+                session_id: slot.session_id.clone(),
+                mtime: slot.mtime,
+            })
+            .collect();
+        if !to_fill.is_empty() {
+            let mut filled: std::collections::HashMap<String, SDKSessionInfo> =
+                derive_infos_via_load(session_store, &to_fill, &project_key, &project_path)
+                    .await
+                    .into_iter()
+                    .map(|info| (info.session_id.clone(), info))
+                    .collect();
+            for slot in page.iter_mut().filter(|slot| slot.info.is_none()) {
+                slot.info = filled.remove(&slot.session_id);
+            }
+        }
+        return Ok(page.into_iter().filter_map(|slot| slot.info).collect());
+    }
+
+    if !has_list_sessions {
+        return Err(ClaudeSDKError::Session(
+            "session_store implements neither list_session_summaries() nor list_sessions() \
+             -- cannot list sessions. Provide a store with at least one of those methods."
+                .to_string(),
+        ));
+    }
     let listing = session_store.list_sessions(&project_key).await?;
-    let summaries = session_store
-        .list_session_summaries(&project_key)
-        .await
-        .unwrap_or_default();
-
-    let mut infos = Vec::new();
-    let mut covered = std::collections::HashSet::new();
-    let known_mtimes = listing
-        .iter()
-        .map(|entry| (entry.session_id.clone(), entry.mtime))
-        .collect::<std::collections::HashMap<_, _>>();
-
-    for summary in summaries {
-        if let Some(known_mtime) = known_mtimes.get(&summary.session_id) {
-            if summary.mtime < *known_mtime {
-                continue;
-            }
-        }
-        covered.insert(summary.session_id.clone());
-        if let Some(info) = summary_entry_to_sdk_info(&summary, Some(&project_path)) {
-            infos.push(info);
-        }
-    }
-
-    for entry in listing {
-        if covered.contains(&entry.session_id) {
-            continue;
-        }
-        match derive_session_info_from_store(
-            session_store,
-            &project_key,
-            &project_path,
-            &entry.session_id,
-        )
-        .await
-        {
-            Ok(Some(mut info)) => {
-                info.last_modified = entry.mtime;
-                infos.push(info);
-            }
-            Ok(None) => {}
-            Err(_) => infos.push(degraded_session_info(&entry.session_id, entry.mtime)),
-        }
-    }
-
-    Ok(sort_limit_offset(infos, limit, offset))
+    let results = derive_infos_via_load(session_store, &listing, &project_key, &project_path).await;
+    Ok(apply_sort_limit_offset(results, limit, offset))
 }
 
-fn degraded_session_info(session_id: &str, last_modified: i64) -> SDKSessionInfo {
-    SDKSessionInfo {
-        session_id: session_id.to_string(),
-        summary: String::new(),
-        last_modified,
-        file_size: None,
-        custom_title: None,
-        first_prompt: None,
-        git_branch: None,
-        cwd: None,
-        tag: None,
-        created_at: None,
-    }
-}
-
+/// Read metadata for a single session from a `SessionStore` (lite-parse of
+/// the serialized entries; `last_modified` from the last entry's timestamp).
 pub async fn get_session_info_from_store(
     session_store: &SessionStoreHandle,
     session_id: &str,
     directory: Option<&str>,
 ) -> Result<Option<SDKSessionInfo>> {
-    if !is_uuid(session_id) {
+    if !is_valid_uuid(session_id) {
         return Ok(None);
     }
-    let project_path = canonical_project_path(directory);
-    let project_key = project_key_for_directory(Some(Path::new(&project_path)));
-    derive_session_info_from_store(session_store, &project_key, &project_path, session_id).await
+    let (project_path, project_key) = project_path_and_key(directory);
+    let Some(jsonl) = load_store_entries_as_jsonl(session_store, &project_key, session_id).await?
+    else {
+        return Ok(None);
+    };
+    let lite = lite::jsonl_to_lite(&jsonl, lite::mtime_from_jsonl_tail(&jsonl));
+    Ok(lite::parse_session_info_from_lite(
+        session_id,
+        &lite,
+        Some(&project_path),
+    ))
 }
 
+// ---------------------------------------------------------------------------
+// Messages / subagents
+// ---------------------------------------------------------------------------
+
+/// Read a session's conversation messages from a `SessionStore` (same chain
+/// reconstruction as the local-disk reader).
 pub async fn get_session_messages_from_store(
     session_store: &SessionStoreHandle,
     session_id: &str,
     directory: Option<&str>,
     limit: Option<usize>,
     offset: usize,
-) -> Result<Vec<SDKSessionMessage>> {
-    if !is_uuid(session_id) {
+) -> Result<Vec<SessionMessage>> {
+    if !is_valid_uuid(session_id) {
         return Ok(Vec::new());
     }
-    let project_key = project_key_for_directory(directory.map(Path::new));
-    let key = SessionKey {
-        project_key,
-        session_id: session_id.to_string(),
-        subpath: None,
-    };
-    let Some(entries) = session_store.load(key).await? else {
+    let (_, project_key) = project_path_and_key(directory);
+    let Some(entries) = session_store
+        .load(main_key(&project_key, session_id))
+        .await?
+        .filter(|entries| !entries.is_empty())
+    else {
         return Ok(Vec::new());
     };
-    Ok(entries_to_session_messages(
-        session_id, entries, limit, offset,
-    ))
+    let entries = chain::filter_transcript_entries(entries);
+    Ok(chain::entries_to_session_messages(&entries, limit, offset))
 }
 
+/// List subagent IDs for a session from a `SessionStore`. Requires
+/// `list_subkeys()` support.
 pub async fn list_subagents_from_store(
     session_store: &SessionStoreHandle,
     session_id: &str,
     directory: Option<&str>,
 ) -> Result<Vec<String>> {
-    if !is_uuid(session_id) {
+    if !is_valid_uuid(session_id) {
         return Ok(Vec::new());
     }
-    let project_key = project_key_for_directory(directory.map(Path::new));
+    if !session_store.supports_list_subkeys() {
+        return Err(ClaudeSDKError::Session(
+            "session_store does not implement list_subkeys() -- cannot list subagents. \
+             Provide a store with a list_subkeys() method."
+                .to_string(),
+        ));
+    }
+    let (_, project_key) = project_path_and_key(directory);
     let subkeys = session_store
-        .list_subkeys(crate::session_store::SessionListSubkeysKey {
+        .list_subkeys(SessionListSubkeysKey {
             project_key,
             session_id: session_id.to_string(),
         })
@@ -227,7 +410,11 @@ pub async fn list_subagents_from_store(
     let mut seen = std::collections::HashSet::new();
     let mut ids = Vec::new();
     for subkey in subkeys {
-        if let Some(agent_id) = subagent_id_from_subkey(&subkey) {
+        if !subkey.starts_with("subagents/") {
+            continue;
+        }
+        let last = subkey.rsplit('/').next().unwrap_or_default();
+        if let Some(agent_id) = last.strip_prefix("agent-") {
             if seen.insert(agent_id.to_string()) {
                 ids.push(agent_id.to_string());
             }
@@ -236,6 +423,10 @@ pub async fn list_subagents_from_store(
     Ok(ids)
 }
 
+/// Read a subagent's messages from a `SessionStore`. The subpath is found via
+/// `list_subkeys()` when supported (else `subagents/agent-<id>` is tried);
+/// `parent_tool_use_id` / `parent_agent_id` come from the subagent's last
+/// `agent_metadata` entry.
 pub async fn get_subagent_messages_from_store(
     session_store: &SessionStoreHandle,
     session_id: &str,
@@ -243,12 +434,29 @@ pub async fn get_subagent_messages_from_store(
     directory: Option<&str>,
     limit: Option<usize>,
     offset: usize,
-) -> Result<Vec<SDKSessionMessage>> {
-    if !is_uuid(session_id) || agent_id.is_empty() {
+) -> Result<Vec<SessionMessage>> {
+    if !is_valid_uuid(session_id) || agent_id.is_empty() {
         return Ok(Vec::new());
     }
-    let project_key = project_key_for_directory(directory.map(Path::new));
-    let subpath = find_subagent_subpath(session_store, &project_key, session_id, agent_id).await?;
+    let (_, project_key) = project_path_and_key(directory);
+
+    let mut subpath = format!("subagents/agent-{agent_id}");
+    if session_store.supports_list_subkeys() {
+        let target = format!("agent-{agent_id}");
+        let subkeys = session_store
+            .list_subkeys(SessionListSubkeysKey {
+                project_key: project_key.clone(),
+                session_id: session_id.to_string(),
+            })
+            .await?;
+        let Some(found) = subkeys.into_iter().find(|subkey| {
+            subkey.starts_with("subagents/") && subkey.rsplit('/').next() == Some(target.as_str())
+        }) else {
+            return Ok(Vec::new());
+        };
+        subpath = found;
+    }
+
     let Some(entries) = session_store
         .load(SessionKey {
             project_key,
@@ -256,191 +464,23 @@ pub async fn get_subagent_messages_from_store(
             subpath: Some(subpath),
         })
         .await?
+        .filter(|entries| !entries.is_empty())
     else {
         return Ok(Vec::new());
     };
-    let entries = entries
-        .into_iter()
-        .filter(|entry| {
-            entry.get("type").and_then(|value| value.as_str()) != Some("agent_metadata")
-        })
-        .collect();
-    Ok(entries_to_session_messages(
-        session_id, entries, limit, offset,
+
+    let (metadata, transcript) = chain::split_agent_metadata(entries);
+    if transcript.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (parent_tool_use_id, parent_agent_id) =
+        chain::parent_ids_from_agent_metadata(metadata.as_ref());
+    let transcript = chain::filter_transcript_entries(transcript);
+    Ok(chain::entries_to_subagent_messages(
+        &transcript,
+        limit,
+        offset,
+        parent_tool_use_id.as_deref(),
+        parent_agent_id.as_deref(),
     ))
-}
-
-async fn find_subagent_subpath(
-    session_store: &SessionStoreHandle,
-    project_key: &str,
-    session_id: &str,
-    agent_id: &str,
-) -> Result<String> {
-    let target = format!("agent-{agent_id}");
-    let subkeys = session_store
-        .list_subkeys(crate::session_store::SessionListSubkeysKey {
-            project_key: project_key.to_string(),
-            session_id: session_id.to_string(),
-        })
-        .await
-        .unwrap_or_default();
-    Ok(subkeys
-        .into_iter()
-        .find(|subkey| {
-            subkey.starts_with("subagents/") && subkey.rsplit('/').next() == Some(target.as_str())
-        })
-        .unwrap_or_else(|| format!("subagents/{target}")))
-}
-
-async fn derive_session_info_from_store(
-    session_store: &SessionStoreHandle,
-    project_key: &str,
-    project_path: &str,
-    session_id: &str,
-) -> Result<Option<SDKSessionInfo>> {
-    let key = SessionKey {
-        project_key: project_key.to_string(),
-        session_id: session_id.to_string(),
-        subpath: None,
-    };
-    let Some(entries) = session_store.load(key.clone()).await? else {
-        return Ok(None);
-    };
-    if entries.is_empty() {
-        return Ok(None);
-    }
-    let summary = fold_session_summary(None, &key, &entries);
-    Ok(summary_entry_to_sdk_info(&summary, Some(project_path)))
-}
-
-fn entries_to_session_messages(
-    session_id: &str,
-    entries: Vec<SessionStoreEntry>,
-    limit: Option<usize>,
-    offset: usize,
-) -> Vec<SDKSessionMessage> {
-    entries
-        .into_iter()
-        .filter_map(|entry| session_message_from_entry(session_id, entry))
-        .skip(offset)
-        .take(limit.filter(|limit| *limit > 0).unwrap_or(usize::MAX))
-        .collect()
-}
-
-fn session_message_from_entry(
-    fallback_session_id: &str,
-    entry: SessionStoreEntry,
-) -> Option<SDKSessionMessage> {
-    let message_type = entry.get("type")?.as_str()?;
-    if message_type != "user" && message_type != "assistant" {
-        return None;
-    }
-    let uuid = entry.get("uuid")?.as_str()?.to_string();
-    let message = entry.get("message")?.clone();
-    Some(SDKSessionMessage {
-        r#type: message_type.to_string(),
-        uuid,
-        session_id: entry
-            .get("session_id")
-            .and_then(|value| value.as_str())
-            .unwrap_or(fallback_session_id)
-            .to_string(),
-        message,
-        parent_tool_use_id: entry
-            .get("parent_tool_use_id")
-            .and_then(|value| value.as_str())
-            .map(String::from),
-    })
-}
-
-fn subagent_id_from_subkey(subkey: &str) -> Option<&str> {
-    if !subkey.starts_with("subagents/") {
-        return None;
-    }
-    subkey.rsplit('/').next()?.strip_prefix("agent-")
-}
-
-fn sort_limit_offset(
-    mut infos: Vec<SDKSessionInfo>,
-    limit: Option<usize>,
-    offset: usize,
-) -> Vec<SDKSessionInfo> {
-    infos.sort_by_key(|info| std::cmp::Reverse(info.last_modified));
-    let infos = if offset > 0 {
-        infos.into_iter().skip(offset).collect()
-    } else {
-        infos
-    };
-    if let Some(limit) = limit.filter(|limit| *limit > 0) {
-        infos.into_iter().take(limit).collect()
-    } else {
-        infos
-    }
-}
-
-fn canonical_project_path(directory: Option<&str>) -> String {
-    let path = directory.map(Path::new).unwrap_or_else(|| Path::new("."));
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| ".".into())
-            .join(path)
-    };
-    std::fs::canonicalize(&absolute)
-        .unwrap_or(absolute)
-        .to_string_lossy()
-        .to_string()
-}
-
-fn is_uuid(value: &str) -> bool {
-    uuid::Uuid::parse_str(value).is_ok()
-}
-
-fn validate_session_id(session_id: &str) -> Result<()> {
-    if is_uuid(session_id) {
-        Ok(())
-    } else {
-        Err(ClaudeSDKError::Session(format!(
-            "Invalid session_id: {session_id}"
-        )))
-    }
-}
-
-fn sanitize_tag(tag: &str) -> Result<String> {
-    let sanitized = tag
-        .chars()
-        .filter(|ch| !ch.is_control())
-        .collect::<String>()
-        .trim()
-        .to_string();
-    if sanitized.is_empty() {
-        Err(ClaudeSDKError::Session(
-            "tag must be non-empty (use None to clear)".to_string(),
-        ))
-    } else {
-        Ok(sanitized)
-    }
-}
-
-fn metadata_entry<const N: usize>(
-    entry_type: &str,
-    session_id: &str,
-    fields: [(&str, serde_json::Value); N],
-) -> SessionStoreEntry {
-    let mut entry = serde_json::Map::new();
-    entry.insert("type".to_string(), serde_json::json!(entry_type));
-    entry.insert("sessionId".to_string(), serde_json::json!(session_id));
-    entry.insert(
-        "uuid".to_string(),
-        serde_json::json!(uuid::Uuid::new_v4().to_string()),
-    );
-    entry.insert(
-        "timestamp".to_string(),
-        serde_json::json!(chrono::Utc::now().to_rfc3339()),
-    );
-    for (key, value) in fields {
-        entry.insert(key.to_string(), value);
-    }
-    entry
 }

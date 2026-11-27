@@ -1,8 +1,21 @@
 //! Session management for Claude Agent SDK.
+//!
+//! Local-disk helpers (`list_sessions`, `get_session_messages`, ...) read the
+//! CLI's `~/.claude/projects/<project>/<session>.jsonl` transcripts; the
+//! `*_from_store` / `*_via_store` variants operate on a [`SessionStore`].
+//!
+//! [`SessionStore`]: crate::session_store::SessionStore
 
 use crate::error::Result;
 use crate::internal::sessions_fs;
 use serde::{Deserialize, Serialize};
+
+pub(crate) mod chain;
+pub(crate) mod fork_core;
+pub(crate) mod lite;
+pub(crate) mod paths;
+pub(crate) mod py_json;
+pub(crate) mod sanitize;
 
 pub mod store;
 pub use store::*;
@@ -11,33 +24,63 @@ pub use store_fork::*;
 pub mod import;
 pub use import::*;
 pub mod local_fork;
-pub use local_fork::*;
+pub use fork_core::ForkSessionResult;
 
-/// Information about a Claude session.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionInfo {
-    pub id: String,
-    pub title: String,
-    pub created_at: String,
-    pub updated_at: String,
-    pub message_count: usize,
-}
+#[cfg(test)]
+mod chain_tests;
 
-/// A message within a session.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Former name of the local session metadata type; local listings now return
+/// the same [`SDKSessionInfo`] shape as Python's `list_sessions()`.
+pub type SessionInfo = SDKSessionInfo;
+
+/// Former name of the fork result returned by [`fork_session`].
+pub type LocalForkSessionResult = ForkSessionResult;
+
+/// A user or assistant message from a session transcript (Python
+/// `SessionMessage`), returned by the local and store-backed readers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SessionMessage {
-    pub id: String,
-    pub role: String,
-    pub content: String,
-    pub timestamp: String,
+    /// `"user"` or `"assistant"`.
+    pub r#type: String,
+    /// Unique message identifier (entry `uuid`).
+    pub uuid: String,
+    /// ID of the session this message belongs to (entry `sessionId`).
+    pub session_id: String,
+    /// Raw Anthropic API message object (role, content, ...), unmodified.
+    pub message: serde_json::Value,
+    /// For subagent messages: the Agent `tool_use` id in the parent session
+    /// that spawned the subagent. Always `None` for main-session messages.
+    #[serde(default)]
+    pub parent_tool_use_id: Option<String>,
+    /// For subagent messages: the agent id of the spawning subagent (nested
+    /// subagents). Always `None` for main-session messages.
+    #[serde(default)]
+    pub parent_agent_id: Option<String>,
 }
 
 /// Options for listing sessions.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ListSessionsOptions {
+    /// Project directory to list sessions for; `None` lists every project.
     pub directory: Option<String>,
+    /// Maximum number of sessions to return (`Some(0)` means no limit).
     pub limit: Option<usize>,
+    /// Number of sessions to skip from the start of the sorted result.
     pub offset: Option<usize>,
+    /// When `directory` is inside a git repository, also include sessions
+    /// from every git worktree of that repository. Defaults to `true`.
+    pub include_worktrees: bool,
+}
+
+impl Default for ListSessionsOptions {
+    fn default() -> Self {
+        Self {
+            directory: None,
+            limit: None,
+            offset: None,
+            include_worktrees: true,
+        }
+    }
 }
 
 /// Options for querying sessions.
@@ -57,52 +100,63 @@ pub struct SessionMutationOptions {
     pub directory: Option<String>,
 }
 
-/// List all available sessions.
-pub async fn list_sessions(opts: &ListSessionsOptions) -> Result<Vec<SessionInfo>> {
-    sessions_fs::list_sessions(opts).await
+/// List sessions with metadata extracted from stat + head/tail reads, sorted
+/// by `last_modified` descending.
+pub async fn list_sessions(opts: &ListSessionsOptions) -> Result<Vec<SDKSessionInfo>> {
+    Ok(sessions_fs::list_sessions(opts).await)
 }
 
-/// Get information about a specific session.
-pub async fn get_session_info(session_id: &str, opts: &SessionQueryOptions) -> Result<SessionInfo> {
-    sessions_fs::get_session_info(session_id, opts.directory.as_deref()).await
+/// Read metadata for a single session. `Ok(None)` when the session id is not
+/// a UUID, the file is missing/empty, it is a sidechain session, or it has no
+/// extractable summary.
+pub async fn get_session_info(
+    session_id: &str,
+    opts: &SessionQueryOptions,
+) -> Result<Option<SDKSessionInfo>> {
+    Ok(sessions_fs::get_session_info(session_id, opts.directory.as_deref()).await)
 }
 
-/// Get all messages for a specific session.
+/// Read a session's conversation messages (the `parentUuid` chain, with
+/// parallel tool calls/results restored). Empty for an invalid or missing
+/// session.
 pub async fn get_session_messages(
     session_id: &str,
     opts: &SessionQueryOptions,
 ) -> Result<Vec<SessionMessage>> {
-    sessions_fs::get_session_messages(
+    Ok(sessions_fs::get_session_messages(
         session_id,
         opts.directory.as_deref(),
         opts.limit,
         opts.offset.unwrap_or(0),
     )
-    .await
+    .await)
 }
 
-/// List subagent IDs for a specific session.
+/// List subagent IDs for a specific session. Empty for an invalid or missing
+/// session.
 pub async fn list_subagents(session_id: &str, opts: &SessionQueryOptions) -> Result<Vec<String>> {
-    sessions_fs::list_subagents(session_id, opts.directory.as_deref()).await
+    Ok(sessions_fs::list_subagents(session_id, opts.directory.as_deref()).await)
 }
 
-/// Get messages for a specific subagent transcript.
+/// Get messages for a specific subagent transcript. Each message carries the
+/// `parent_tool_use_id` / `parent_agent_id` recorded in the subagent's
+/// `.meta.json` sidecar.
 pub async fn get_subagent_messages(
     session_id: &str,
     agent_id: &str,
     opts: &SessionQueryOptions,
 ) -> Result<Vec<SessionMessage>> {
-    sessions_fs::get_subagent_messages(
+    Ok(sessions_fs::get_subagent_messages(
         session_id,
         agent_id,
         opts.directory.as_deref(),
         opts.limit,
         opts.offset.unwrap_or(0),
     )
-    .await
+    .await)
 }
 
-/// Rename a session.
+/// Rename a session by appending a `custom-title` entry.
 pub async fn rename_session(
     session_id: &str,
     title: &str,
@@ -126,7 +180,7 @@ pub async fn fork_session(
     opts: &SessionMutationOptions,
     up_to_message_id: Option<&str>,
     title: Option<&str>,
-) -> Result<LocalForkSessionResult> {
+) -> Result<ForkSessionResult> {
     local_fork::fork_session(
         session_id,
         opts.directory.as_deref(),
@@ -136,7 +190,7 @@ pub async fn fork_session(
     .await
 }
 
-/// Delete a session.
+/// Delete a session transcript and its subagent directory.
 pub async fn delete_session(session_id: &str, opts: &SessionMutationOptions) -> Result<()> {
     sessions_fs::delete_session(session_id, opts.directory.as_deref()).await
 }
