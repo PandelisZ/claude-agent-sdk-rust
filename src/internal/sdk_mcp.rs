@@ -329,11 +329,13 @@ pub(crate) async fn run_tool(
     let Some(entry) = server.tools.iter().find(|entry| entry.tool.name == name) else {
         return SdkMcpToolResult::error(format!("Tool '{name}' not found"));
     };
-    match validate_arguments(&arguments, &entry.tool.input_schema) {
-        Ok(()) => {}
-        Err(ValidationFailure::Schema(message)) => return SdkMcpToolResult::error(message),
-        Err(ValidationFailure::Instance(message)) => {
-            return SdkMcpToolResult::error(format!("Input validation error: {message}"));
+    if entry.validate_input {
+        match validate_arguments(&arguments, &entry.tool.input_schema) {
+            Ok(()) => {}
+            Err(ValidationFailure::Schema(message)) => return SdkMcpToolResult::error(message),
+            Err(ValidationFailure::Instance(message)) => {
+                return SdkMcpToolResult::error(format!("Input validation error: {message}"));
+            }
         }
     }
     run_handler(&entry.handler, arguments).await

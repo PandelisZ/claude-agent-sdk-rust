@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (pre-1.0: breaking changes bump the minor version).
 
+## [0.5.1] - 2026-11-26
+
+### Fixed
+
+- Restored the supervised spawned-stream API from 0.4.1, which 0.5.0
+  dropped: `ClaudeAgentClient::spawn_stream_message_supervised`,
+  `ClaudeAgentClient::run_client_stream`, `SpawnedStream` and
+  `SpawnedStreamCleanup` (`wait_for_cleanup`). It is rebuilt on the 0.5.0
+  runtime. `spawn_stream_message` now delegates to it.
+- A spawned stream now stops as soon as its receiver is dropped, even while
+  the CLI is idle. Before, it noticed only when the next message arrived. It
+  always disconnects, which ends and reaps the CLI child.
+- An abandoned spawned stream (receiver dropped mid-turn) now ends the CLI
+  at once: SIGTERM, then SIGKILL, without the 5 s stdin-EOF grace period of a
+  graceful close. A turn that completes still closes gracefully.
+
+### Added
+
+- `Transport::abort`, with a default that calls `close`, so existing custom
+  transports are unaffected. The subprocess transport overrides it to signal
+  the CLI without waiting for it to exit on stdin EOF.
+- `SdkMcpTool::validate_input(false)` skips the input-schema check before
+  the handler runs. Use it for handlers that accept or repair arguments
+  outside their advertised schema (the MCP Python server's
+  `validate_input=False`). Validation stays on by default.
+
 ## [0.5.0] - 2026-11-26
 
 Full upstream parity pass against the Python `claude-agent-sdk` **v0.2.189**

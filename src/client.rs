@@ -63,6 +63,46 @@ impl std::fmt::Debug for ClaudeAgentClient {
     }
 }
 
+/// A spawned single-prompt stream: the event receiver plus a handle for
+/// awaiting the SDK-owned task's cleanup (see
+/// [`ClaudeAgentClient::spawn_stream_message_supervised`]).
+pub struct SpawnedStream {
+    pub events: mpsc::UnboundedReceiver<StreamEvent>,
+    pub cleanup: SpawnedStreamCleanup,
+}
+
+/// Awaits the cleanup of a [`SpawnedStream`]'s background task. Cloneable;
+/// the first waiter joins the task and later waits return `Ok(())`.
+#[derive(Clone)]
+pub struct SpawnedStreamCleanup {
+    task: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<Result<()>>>>>,
+}
+
+impl std::fmt::Debug for SpawnedStreamCleanup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpawnedStreamCleanup")
+            .finish_non_exhaustive()
+    }
+}
+
+impl SpawnedStreamCleanup {
+    /// Waits until the stream task has disconnected its client. The task
+    /// notices a dropped receiver, disconnects, and the subprocess transport
+    /// ends and waits for the CLI child before this resolves. Returns the
+    /// task's result (a connect or stream error, if any).
+    pub async fn wait_for_cleanup(&self) -> Result<()> {
+        let Some(task) = self.task.lock().await.take() else {
+            return Ok(());
+        };
+        match task.await {
+            Ok(result) => result,
+            Err(error) => Err(crate::error::ClaudeSDKError::Other(format!(
+                "spawned Claude stream task did not finish cleanly: {error}"
+            ))),
+        }
+    }
+}
+
 impl ClaudeAgentClient {
     /// Fire-and-forget streaming for a single prompt.
     ///
@@ -80,33 +120,66 @@ impl ClaudeAgentClient {
         options: ClaudeAgentOptions,
         content: impl Into<UserMessageInput>,
     ) -> mpsc::UnboundedReceiver<StreamEvent> {
+        Self::spawn_stream_message_supervised(options, content).events
+    }
+
+    /// Like [`Self::spawn_stream_message`], but also returns a
+    /// [`SpawnedStreamCleanup`] handle. After dropping the event receiver the
+    /// caller can await [`SpawnedStreamCleanup::wait_for_cleanup`] to know the
+    /// SDK has disconnected and reaped the CLI child.
+    pub fn spawn_stream_message_supervised(
+        options: ClaudeAgentOptions,
+        content: impl Into<UserMessageInput>,
+    ) -> SpawnedStream {
         let content = content.into();
         let (tx, rx) = mpsc::unbounded_channel();
-        tokio::spawn(async move {
-            let mut client = match Self::new(options) {
-                Ok(client) => client,
-                Err(err) => {
-                    let _ = tx.send(StreamEvent::Error(err.to_string()));
-                    return;
-                }
+        let task = tokio::spawn(async move {
+            let result = match Self::new(options) {
+                Ok(client) => Self::run_client_stream(client, content, tx.clone()).await,
+                Err(err) => Err(err),
             };
-            let result = async {
-                client.connect().await?;
-                client.query(content).await?;
-                forward_events(client.receive_response(), client.session_id.clone(), &tx).await;
-                Ok::<(), crate::error::ClaudeSDKError>(())
-            }
-            .await;
-            if let Err(err) = result {
+            if let Err(ref err) = result {
                 let _ = tx.send(StreamEvent::Error(err.to_string()));
             }
-            // The turn is over: end the receiver now, then let the CLI exit.
-            drop(tx);
-            if let Err(err) = client.disconnect().await {
-                tracing::debug!("error closing the streamed session: {err}");
-            }
+            result
         });
-        rx
+        SpawnedStream {
+            events: rx,
+            cleanup: SpawnedStreamCleanup {
+                task: Arc::new(tokio::sync::Mutex::new(Some(task))),
+            },
+        }
+    }
+
+    /// Runs one prompt on an already constructed client, forwarding each
+    /// [`StreamEvent`] of the turn to `tx`, and always disconnects the client
+    /// before returning: when the turn's result arrives, when an error occurs,
+    /// or as soon as the receiver for `tx` is dropped (even while the CLI is
+    /// idle). Hosts use this to own the stream task's lifecycle themselves.
+    pub async fn run_client_stream(
+        mut client: Self,
+        content: UserMessageInput,
+        tx: mpsc::UnboundedSender<StreamEvent>,
+    ) -> Result<()> {
+        let result = async {
+            client.connect().await?;
+            client.query(content).await?;
+            let session_id = client.session_id.clone();
+            let abandoned = tokio::select! {
+                _ = tx.closed() => true,
+                _ = forward_events(client.receive_response(), session_id, &tx) => false,
+            };
+            Ok(abandoned)
+        }
+        .await;
+        // The turn is over or the consumer left: end the receiver, then close
+        // the transport, which ends and reaps the CLI child. An abandoned
+        // turn (receiver dropped, e.g. the host interrupted it) ends the CLI
+        // at once instead of waiting for it to exit on stdin EOF.
+        let abandoned = matches!(result, Ok(true)) || tx.is_closed();
+        drop(tx);
+        let close_result = client.disconnect_with(!abandoned).await;
+        result.map(|_| ()).and(close_result)
     }
 
     /// A client for the default subprocess transport.
@@ -452,9 +525,19 @@ impl ClaudeAgentClient {
     /// control handlers, close the transport (stdin EOF, then SIGTERM/SIGKILL
     /// if the CLI does not exit) and remove a materialized resume directory.
     pub async fn disconnect(&mut self) -> Result<()> {
+        self.disconnect_with(true).await
+    }
+
+    /// `disconnect`, or with `graceful == false` an abandoned session: the
+    /// transport is aborted (the CLI is signalled without a stdin-EOF grace).
+    async fn disconnect_with(&mut self, graceful: bool) -> Result<()> {
         let mut result = Ok(());
         if let Some(runtime) = self.runtime.take() {
-            let (closed, transport) = runtime.close().await;
+            let (closed, transport) = if graceful {
+                runtime.close().await
+            } else {
+                runtime.abort_close().await
+            };
             result = closed;
             if self.custom_transport {
                 self.transport = transport;

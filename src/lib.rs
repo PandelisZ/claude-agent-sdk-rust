@@ -116,7 +116,7 @@ pub use internal::runtime::MessageStream;
 pub use internal::transport::{SubprocessCLITransport, Transport, TransportOptions};
 
 // Re-export client types
-pub use client::ClaudeAgentClient;
+pub use client::{ClaudeAgentClient, SpawnedStream, SpawnedStreamCleanup};
 pub use client_types::{MessageResponse, StreamEvent};
 
 /// Python SDK-compatible alias for the interactive client.

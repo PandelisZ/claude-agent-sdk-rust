@@ -314,6 +314,7 @@ pub struct SdkMcpTool {
     pub input_schema: Value,
     pub annotations: Option<MCPToolAnnotations>,
     handler: Arc<SdkMcpToolHandler>,
+    validate_input: bool,
 }
 
 impl std::fmt::Debug for SdkMcpTool {
@@ -346,6 +347,7 @@ impl SdkMcpTool {
             input_schema,
             annotations,
             handler: sync_handler(handler),
+            validate_input: true,
         }
     }
 
@@ -372,6 +374,7 @@ impl SdkMcpTool {
             input_schema,
             annotations,
             handler: async_handler(handler),
+            validate_input: true,
         }
     }
 
@@ -382,14 +385,23 @@ impl SdkMcpTool {
         crate::internal::sdk_mcp::run_handler(&self.handler, input).await
     }
 
-    fn into_parts(self) -> (MCPTool, Arc<SdkMcpToolHandler>) {
+    /// Whether `tools/call` arguments are checked against `input_schema`
+    /// before the handler runs (default `true`, like the Python SDK). Pass
+    /// `false` for a handler that accepts or repairs arguments outside its
+    /// advertised schema; the MCP Python server's `validate_input=False`.
+    pub fn validate_input(mut self, validate: bool) -> Self {
+        self.validate_input = validate;
+        self
+    }
+
+    fn into_parts(self) -> (MCPTool, Arc<SdkMcpToolHandler>, bool) {
         let tool = MCPTool {
             name: self.name,
             description: self.description,
             input_schema: self.input_schema,
             annotations: self.annotations,
         };
-        (tool, self.handler)
+        (tool, self.handler, self.validate_input)
     }
 }
 
@@ -499,6 +511,7 @@ pub(crate) struct RegisteredTool {
     /// The tool as listed on the wire (input schema already normalized).
     pub(crate) tool: MCPTool,
     pub(crate) handler: Arc<SdkMcpToolHandler>,
+    pub(crate) validate_input: bool,
 }
 
 impl Clone for RegisteredTool {
@@ -506,6 +519,7 @@ impl Clone for RegisteredTool {
         Self {
             tool: self.tool.clone(),
             handler: Arc::clone(&self.handler),
+            validate_input: self.validate_input,
         }
     }
 }
@@ -583,12 +597,16 @@ impl SimpleMCPServer {
         self.custom.is_some()
     }
 
-    fn insert(&mut self, tool: MCPTool, handler: Arc<SdkMcpToolHandler>) {
+    fn insert(&mut self, tool: MCPTool, handler: Arc<SdkMcpToolHandler>, validate_input: bool) {
         let tool = MCPTool {
             input_schema: crate::internal::sdk_mcp::build_input_schema(&tool.input_schema),
             ..tool
         };
-        let entry = RegisteredTool { tool, handler };
+        let entry = RegisteredTool {
+            tool,
+            handler,
+            validate_input,
+        };
         // A later registration under the same name replaces the earlier one
         // in place, keeping the listing order.
         if let Some(existing) = self
@@ -607,7 +625,7 @@ impl SimpleMCPServer {
     where
         F: Fn(Value) -> Result<Vec<MCPContent>, String> + Send + Sync + 'static,
     {
-        self.insert(tool, sync_handler(handler));
+        self.insert(tool, sync_handler(handler), true);
     }
 
     /// Register a tool with an async handler.
@@ -617,13 +635,13 @@ impl SimpleMCPServer {
         Fut: Future<Output = R> + Send + 'static,
         R: Into<SdkMcpToolResult>,
     {
-        self.insert(tool, async_handler(handler));
+        self.insert(tool, async_handler(handler), true);
     }
 
     /// Register a pre-built SDK MCP tool with the server.
     pub fn register_sdk_tool(&mut self, tool: SdkMcpTool) {
-        let (tool, handler) = tool.into_parts();
-        self.insert(tool, handler);
+        let (tool, handler, validate_input) = tool.into_parts();
+        self.insert(tool, handler, validate_input);
     }
 
     /// Get all registered tools, in registration order, with their input

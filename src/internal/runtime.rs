@@ -146,6 +146,9 @@ enum IoCommand {
         reply: oneshot::Sender<Result<()>>,
     },
     Close {
+        /// `false` when the consumer abandoned the session: the transport
+        /// is aborted instead of closed gracefully.
+        graceful: bool,
         reply: oneshot::Sender<Result<()>>,
     },
 }
@@ -765,11 +768,22 @@ impl Runtime {
     /// The close runs in its own task (Python shields `Query.close`): a
     /// caller that stops waiting, for example under a timeout, must not
     /// leave the handlers, the ceiling and the CLI process half torn down.
-    pub(crate) async fn close(mut self) -> (Result<()>, Option<Box<dyn Transport>>) {
+    pub(crate) async fn close(self) -> (Result<()>, Option<Box<dyn Transport>>) {
+        self.close_with(true).await
+    }
+
+    /// Like [`Self::close`], but the consumer abandoned the session, so the
+    /// transport is aborted ([`Transport::abort`]): the CLI is ended without
+    /// the stdin-EOF grace period.
+    pub(crate) async fn abort_close(self) -> (Result<()>, Option<Box<dyn Transport>>) {
+        self.close_with(false).await
+    }
+
+    async fn close_with(mut self, graceful: bool) -> (Result<()>, Option<Box<dyn Transport>>) {
         let Some(inner) = self.inner.take() else {
             return (Ok(()), None);
         };
-        match tokio::spawn(inner.close()).await {
+        match tokio::spawn(inner.close(graceful)).await {
             Ok(closed) => closed,
             Err(error) => (
                 Err(ClaudeSDKError::Other(format!(
@@ -789,7 +803,7 @@ impl Drop for Runtime {
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => {
                 handle.spawn(async move {
-                    let _ = inner.close().await;
+                    let _ = inner.close(true).await;
                 });
             }
             Err(_) => inner.abort(),
@@ -798,7 +812,7 @@ impl Drop for Runtime {
 }
 
 impl RuntimeInner {
-    async fn close(mut self) -> (Result<()>, Option<Box<dyn Transport>>) {
+    async fn close(mut self, graceful: bool) -> (Result<()>, Option<Box<dyn Transport>>) {
         self.shared.closed.store(true, Ordering::SeqCst);
         if let Some(shutdown) = self.router_shutdown.take() {
             let _ = shutdown.send(());
@@ -806,7 +820,12 @@ impl RuntimeInner {
         let _ = (&mut self.router).await;
         self.shared.abort_children();
         let (reply, rx) = oneshot::channel();
-        let result = if self.shared.cmd_tx.send(IoCommand::Close { reply }).is_ok() {
+        let result = if self
+            .shared
+            .cmd_tx
+            .send(IoCommand::Close { graceful, reply })
+            .is_ok()
+        {
             rx.await.unwrap_or(Ok(()))
         } else {
             Ok(())
@@ -907,8 +926,13 @@ async fn io_loop(
             Some(IoCommand::EndInput { reply }) => {
                 let _ = reply.send(transport.close_input().await);
             }
-            Some(IoCommand::Close { reply }) => {
-                let _ = reply.send(transport.close().await);
+            Some(IoCommand::Close { graceful, reply }) => {
+                let closed = if graceful {
+                    transport.close().await
+                } else {
+                    transport.abort().await
+                };
+                let _ = reply.send(closed);
                 return transport;
             }
             None => {

@@ -241,3 +241,122 @@ drain_stdin
     assert_eq!(usage.output_tokens, 30);
     assert_eq!(usage.total_tokens, 42);
 }
+
+fn pid_alive(pid: &str) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", pid.trim()])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap()
+        .success()
+}
+
+/// Dropping a supervised stream's receiver while the CLI is idle (no output
+/// coming) ends the task, and `wait_for_cleanup` resolves only after the CLI
+/// child has been reaped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn supervised_stream_receiver_drop_reaps_an_idle_cli() {
+    let (dir, script) = fake_cli(
+        r#"printf '%s' "$$" > "$(dirname "$0")/pid"
+answer_init
+read -r prompt
+assistant working
+drain_stdin
+"#,
+    );
+    let mut spawned =
+        ClaudeAgentClient::spawn_stream_message_supervised(options_for(&script).build(), "hi");
+    let first = tokio::time::timeout(Duration::from_secs(20), spawned.events.recv())
+        .await
+        .expect("first event")
+        .expect("stream open");
+    assert!(
+        !matches!(first, claude_code_sdk_rust::StreamEvent::Error(_)),
+        "{first:?}"
+    );
+    let pid = std::fs::read_to_string(dir.join("pid")).unwrap();
+    assert!(pid_alive(&pid));
+    drop(spawned.events);
+    tokio::time::timeout(Duration::from_secs(20), spawned.cleanup.wait_for_cleanup())
+        .await
+        .expect("receiver drop unblocks the stream task")
+        .expect("clean shutdown");
+    assert!(!pid_alive(&pid), "CLI {pid} still running after cleanup");
+    // A second wait is a no-op.
+    spawned.cleanup.wait_for_cleanup().await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A supervised stream delivers the turn's events, ends the receiver after
+/// the result, and its cleanup leaves no CLI behind.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn supervised_stream_delivers_the_turn_then_cleans_up() {
+    let (dir, script) = fake_cli(
+        r#"printf '%s' "$$" > "$(dirname "$0")/pid"
+answer_init
+read -r prompt
+assistant hello
+result
+drain_stdin
+"#,
+    );
+    let spawned =
+        ClaudeAgentClient::spawn_stream_message_supervised(options_for(&script).build(), "hi");
+    let mut events = spawned.events;
+    let mut seen = Vec::new();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while let Some(event) = events.recv().await {
+            seen.push(event);
+        }
+    })
+    .await
+    .expect("receiver ends after the result");
+    assert!(
+        !seen
+            .iter()
+            .any(|e| matches!(e, claude_code_sdk_rust::StreamEvent::Error(_))),
+        "{seen:?}"
+    );
+    assert!(!seen.is_empty());
+    tokio::time::timeout(Duration::from_secs(20), spawned.cleanup.wait_for_cleanup())
+        .await
+        .expect("cleanup finishes")
+        .expect("clean shutdown");
+    let pid = std::fs::read_to_string(dir.join("pid")).unwrap();
+    assert!(!pid_alive(&pid));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An abandoned stream (receiver dropped mid-turn) ends a CLI that ignores
+/// stdin EOF at once, without the graceful close's 5 s EOF grace period.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn abandoned_stream_does_not_wait_for_the_eof_grace_period() {
+    let (dir, script) = fake_cli(
+        r#"printf '%s' "$$" > "$(dirname "$0")/pid"
+answer_init
+read -r prompt
+assistant working
+exec sleep 600
+"#,
+    );
+    let mut spawned =
+        ClaudeAgentClient::spawn_stream_message_supervised(options_for(&script).build(), "hi");
+    tokio::time::timeout(Duration::from_secs(20), spawned.events.recv())
+        .await
+        .expect("first event")
+        .expect("stream open");
+    let pid = std::fs::read_to_string(dir.join("pid")).unwrap();
+    let started = std::time::Instant::now();
+    drop(spawned.events);
+    tokio::time::timeout(Duration::from_secs(20), spawned.cleanup.wait_for_cleanup())
+        .await
+        .expect("cleanup finishes")
+        .expect("clean shutdown");
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "abandoned stream took {:?} to clean up",
+        started.elapsed()
+    );
+    assert!(!pid_alive(&pid), "CLI {pid} still running after cleanup");
+    let _ = std::fs::remove_dir_all(&dir);
+}

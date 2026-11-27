@@ -825,3 +825,46 @@ async fn async_tool_with_annotations_lists_its_hints() {
     let tools = list_tools(&servers).await;
     assert_eq!(tools[0]["annotations"], json!({"openWorldHint": true}));
 }
+
+/// `SdkMcpTool::validate_input(false)` hands arguments outside the schema to
+/// the handler (which may repair them); the default still rejects them.
+#[tokio::test]
+async fn validate_input_false_lets_the_handler_see_off_schema_arguments() {
+    let schema = json!({
+        "type": "object",
+        "properties": {"path": {"type": "string"}},
+        "required": ["path"]
+    });
+    let echo = |args: Value| async move {
+        let path = args
+            .get("path")
+            .or_else(|| args.get("file_path"))
+            .and_then(Value::as_str)
+            .unwrap_or("?")
+            .to_string();
+        SdkMcpToolResult::text(path)
+    };
+    let mut server = SimpleMCPServer::new("s");
+    server.register_sdk_tool(claude_code_sdk_rust::mcp::SdkMcpTool::new_async(
+        "strict",
+        "d",
+        schema.clone(),
+        None,
+        echo,
+    ));
+    server.register_sdk_tool(
+        claude_code_sdk_rust::mcp::SdkMcpTool::new_async("lenient", "d", schema, None, echo)
+            .validate_input(false),
+    );
+
+    let strict = server.call_tool("strict", json!({"file_path": "a"})).await;
+    assert!(strict.is_error, "{strict:?}");
+
+    let lenient = server.call_tool("lenient", json!({"file_path": "a"})).await;
+    assert!(!lenient.is_error, "{lenient:?}");
+    assert!(matches!(&lenient.content[0], MCPContent::Text { text } if text == "a"));
+
+    // The advertised schema is unchanged.
+    let listed = server.list_tools();
+    assert_eq!(listed[1].input_schema["required"], json!(["path"]));
+}

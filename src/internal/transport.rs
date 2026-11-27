@@ -66,6 +66,13 @@ pub trait Transport: Send + Sync {
     /// Close the connection and release its resources. Implementations must
     /// bound their own awaits: the SDK waits for this to return.
     async fn close(&mut self) -> Result<()>;
+    /// End the connection now because its consumer abandoned it, without
+    /// giving the peer time to finish (the subprocess transport skips the
+    /// stdin-EOF grace period and signals the CLI at once). Defaults to
+    /// [`Self::close`]. Must bound its awaits like `close`.
+    async fn abort(&mut self) -> Result<()> {
+        self.close().await
+    }
     /// Whether the transport is ready for communication (Python
     /// `is_ready()`).
     fn is_ready(&self) -> bool {
@@ -808,15 +815,27 @@ impl Transport for SubprocessCLITransport {
     }
 
     async fn close(&mut self) -> Result<()> {
+        self.shutdown(true).await
+    }
+
+    async fn abort(&mut self) -> Result<()> {
+        self.shutdown(false).await
+    }
+}
+
+impl SubprocessCLITransport {
+    /// Close stdin, end the CLI and reap it. `graceful` first waits for the
+    /// CLI to exit on stdin EOF (so it can flush its session transcript);
+    /// otherwise it is sent SIGTERM at once. Either way SIGKILL follows if it
+    /// does not exit.
+    async fn shutdown(&mut self, graceful: bool) -> Result<()> {
         let _ = self.close_input().await;
 
         if let Some(mut child) = self.child.take() {
-            // After stdin EOF, give the CLI time to flush its session
-            // transcript before escalating to SIGTERM, then SIGKILL.
             let stage = self.close_stage_timeout;
-            if matches!(child.try_wait(), Ok(None))
-                && tokio::time::timeout(stage, child.wait()).await.is_err()
-            {
+            let running = matches!(child.try_wait(), Ok(None));
+            let exited_on_eof = graceful && tokio::time::timeout(stage, child.wait()).await.is_ok();
+            if running && !exited_on_eof {
                 terminate(&mut child);
                 if tokio::time::timeout(stage, child.wait()).await.is_err() {
                     let _ = child.start_kill();
