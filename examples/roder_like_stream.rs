@@ -53,8 +53,17 @@ async fn main() {
             StreamEvent::ContentChunk(text) => print!("{text}"),
             StreamEvent::ToolUseStart { name, .. } => println!("\n[tool start: {name}]"),
             StreamEvent::ToolResult { tool_use_id, .. } => println!("[tool result: {tool_use_id}]"),
+            // One assistant message finished; the turn may continue with tools.
             StreamEvent::Complete(response) => {
-                println!("\n[complete stop_reason={:?}]", response.stop_reason)
+                println!(
+                    "\n[message complete stop_reason={:?}]",
+                    response.stop_reason
+                )
+            }
+            // The result message: the whole turn is done.
+            StreamEvent::TurnComplete(response) => {
+                println!("\n[turn complete stop_reason={:?}]", response.stop_reason);
+                break;
             }
             StreamEvent::Error(message) => println!("\n[ERROR] {message}"),
             _ => {}

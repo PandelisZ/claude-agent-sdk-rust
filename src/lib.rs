@@ -1,3 +1,50 @@
+//! Async Rust SDK for the Claude Code CLI, a port of the Python
+//! [`claude-agent-sdk`](https://github.com/anthropics/claude-agent-sdk-python)
+//! (parity target: v0.2.189).
+//!
+//! The SDK spawns an authenticated local `claude` CLI and talks to it over the
+//! stream-json control protocol. Entry points:
+//!
+//! - [`query()`] / [`stream_query`]: one-shot runs (the Python `query()`);
+//!   [`stream_query`] yields each [`Message`] as a [`MessageStream`], and
+//!   [`query_messages`] collects them.
+//! - [`ClaudeAgentClient`] (alias [`ClaudeSDKClient`]): an interactive session
+//!   with [`receive_response`](ClaudeAgentClient::receive_response) /
+//!   [`receive_messages`](ClaudeAgentClient::receive_messages) streams,
+//!   [`collect_response`](ClaudeAgentClient::collect_response), event
+//!   streaming and control requests (interrupt, model and permission-mode
+//!   changes, MCP status, ...).
+//! - [`ClaudeAgentOptions::builder`]: typed options, including hooks
+//!   ([`HookMatcher`]), permission callbacks
+//!   ([`ClaudeAgentOptionsBuilder::can_use_tool`]) and in-process SDK MCP
+//!   servers ([`async_tool`], [`create_sdk_mcp_server`]).
+//! - [`sessions`]: local transcript helpers ([`list_sessions`],
+//!   [`get_session_messages`], ...) and [`SessionStore`]-backed variants.
+//! - [`Transport`]: the transport extension point
+//!   ([`SubprocessCLITransport`] by default).
+//!
+//! ```no_run
+//! use claude_code_sdk_rust::{ClaudeAgentClient, ClaudeAgentOptions, Message};
+//! use futures::StreamExt;
+//!
+//! # async fn run() -> claude_code_sdk_rust::Result<()> {
+//! let mut client = ClaudeAgentClient::new(ClaudeAgentOptions::default())?;
+//! client.connect().await?;
+//! client.query("What does this repository do?").await?;
+//! let mut messages = client.receive_response();
+//! while let Some(message) = messages.next().await {
+//!     if let Message::ResultMsg { result, .. } = message? {
+//!         println!("{result:?}");
+//!     }
+//! }
+//! client.disconnect().await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! See the README for more examples; its code blocks are compiled as
+//! doctests.
+
 pub mod client;
 mod client_stream;
 pub mod client_types;
@@ -101,3 +148,8 @@ pub use sessions::{
 
 // Store adapters call this inside append() (Python exports it at the root).
 pub use session_summary::fold_session_summary;
+
+// Compile the README's code examples as doctests.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeDoctests;
